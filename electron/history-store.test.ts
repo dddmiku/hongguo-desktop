@@ -1,0 +1,14 @@
+import {describe,it,expect} from 'vitest';
+import {mkdtemp,mkdir,rm,writeFile} from 'node:fs/promises';
+import path from 'node:path';
+import {HistoryStore} from './history-store';
+import {Store} from './store';
+import type {HistoryItem} from '../shared/contracts';
+const history=(n:number,at=Date.now()/1000):HistoryItem=>({series:{id:String(1234567890123450+n),title:`历史剧 ${n}`,cover:'',intro:'',totalEpisodes:30,tags:[],actors:[]},episode:5,position:20,duration:60,watchedAt:at,uid:'user-a'});
+describe('完整历史而非固定保留100条',()=>{
+  it('1500条均持久保存，界面分页不截断存储',()=>{const s=new HistoryStore(':memory:');try{s.merge('user-a',Array.from({length:1500},(_,n)=>history(n,1700000000+n)));expect(s.count('user-a')).toBe(1500);let cursor:string|null=null,ids=new Set<string>();do{const page=s.query('user-a',{limit:50,...cursor?{cursor}:{}});for(const item of page.items)ids.add(item.series.id);cursor=page.nextCursor;expect(page.total).toBe(1500);}while(cursor);expect(ids.size).toBe(1500);expect(s.query('other').items).toHaveLength(0);}finally{s.close();}});
+  it('云端毫秒与本机秒统一，真实回看更早集数不会被旧进度覆盖',()=>{const s=new HistoryStore(':memory:');try{s.merge('user-a',[{...history(1,1700000000000),episode:20}]);s.merge('user-a',[{...history(1,1700000001),episode:3}],true);expect(s.query('user-a').items[0].episode).toBe(3);expect(s.query('user-a').items[0].watchedAt).toBe(1700000001);}finally{s.close();}});
+  it('删除本机记录后，同一旧云记录不会下轮同步复活，主动观看重新记录',()=>{const s=new HistoryStore(':memory:');try{const item=history(1,1700000000);s.merge('user-a',[item]);s.remove('user-a',item.series.id);s.merge('user-a',[item]);expect(s.count('user-a')).toBe(0);s.merge('user-a',[history(1)],true);expect(s.count('user-a')).toBe(1);}finally{s.close();}});
+  it('搜索与看完状态按真实字段筛选，游标不能跨账号/筛选复用',()=>{const s=new HistoryStore(':memory:');try{s.merge('user-a',[history(1),history(2),{...history(3),episode:30,position:60}]);expect(s.query('user-a',{status:'finished'}).items).toHaveLength(1);expect(s.query('user-a',{search:'历史剧 1'}).items).toHaveLength(1);const cursor=s.query('user-a',{limit:1}).nextCursor!;expect(()=>s.query('other',{cursor})).toThrow('分页已失效');expect(()=>s.query('user-a',{cursor,status:'finished'})).toThrow('分页已失效');}finally{s.close();}});
+  it('旧JSON完整迁入SQLite并保留固定备份，元数据为空也能保留',async()=>{await mkdir(path.join(process.cwd(),'_work'),{recursive:true});const dir=await mkdtemp(path.join(process.cwd(),'_work/history-migrate-'));let s:Store|undefined;try{const file=path.join(dir,'library.json');await writeFile(file,JSON.stringify({schema:1,settings:{},libraries:{'user-a':{history:Array.from({length:1100},(_,n)=>history(n)),favorites:[]}}}));s=new Store(file);await s.load();expect(s.library('user-a').historyTotal).toBe(1100);expect(s.library('user-a').history).toHaveLength(50);expect(s.historyPage('user-a',{search:'历史剧 1099'}).items).toHaveLength(1);}finally{s?.close();await rm(dir,{recursive:true,force:true});}});
+});

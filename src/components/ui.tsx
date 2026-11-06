@@ -1,5 +1,5 @@
 import { AlertCircle, Check, LoaderCircle, RefreshCw, X } from 'lucide-react';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 export const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -38,6 +38,7 @@ export function Dialog({ children, title, onClose, wide = false, drawer = false 
   return <div className={`dialog-layer ${drawer ? 'drawer-layer' : ''}`} onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}><div className={`dialog ${wide ? 'wide' : ''} ${drawer ? 'drawer' : ''}`} ref={root} tabIndex={-1} role="dialog" aria-modal="true" aria-label={title}><button className="icon-button dialog-close" onClick={onClose} aria-label="关闭"><X size={20} /></button>{children}</div></div>;
 }
 
-export function Poster({ cover, title, className = '' }: { cover: string; title: string; className?: string }) {
-  return cover ? <img className={`poster ${className}`} src={cover} alt={title} loading="lazy" onError={e => { e.currentTarget.style.visibility = 'hidden'; }} /> : <div className={`poster poster-placeholder ${className}`} aria-label={title}>{title.slice(0, 1)}</div>;
+export function Poster({ cover, title, className = '', priority = false }: { cover: string; title: string; className?: string; priority?: boolean }) {
+  const [failedCover, setFailedCover] = useState('');
+  return cover && failedCover !== cover ? <img className={`poster ${className}`} src={cover} alt={title} loading={priority ? 'eager' : 'lazy'} fetchPriority={priority ? 'high' : 'auto'} decoding="async" onError={() => setFailedCover(cover)} /> : <div className={`poster poster-placeholder ${className}`} aria-label={title}>{title.slice(0, 1)}</div>;
 }

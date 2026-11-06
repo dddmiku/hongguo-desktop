@@ -6,21 +6,33 @@ import { Store } from './store';
 import { Supervisor } from './supervisor';
 import { readLegacy } from './migration';
 import { REPOSITORY } from '../shared/meta';
-import type { HistoryItem, Library, PlaybackProgress, Series, Session, UpdateInfo, Settings } from '../shared/contracts';
+import type { HistoryItem, HistoryQuery, Library, PlaybackProgress, Series, Session, UpdateInfo, Settings } from '../shared/contracts';
 
 app.setName('红果桌面');
 if(process.env.HG_TEST_DATA_DIR)app.setPath('userData',process.env.HG_TEST_DATA_DIR);
 let window:BrowserWindow, tray:Tray, store:Store, supervisor:Supervisor, quitting=false,currentUid='local';
 let syncing:Promise<{library:Library;warnings:string[]}>|undefined;
+type RemoteHistoryPage={items:HistoryItem[];hasMore:boolean;nextCursor:string|null;complete:boolean;total:number;warning?:string};
+let historyContinuation:{uid:string;cursor:string;failures:number}|null=null,historyTimer:ReturnType<typeof setTimeout>|undefined;
+const emitLibrary=()=>{if(window&&!window.isDestroyed())window.webContents.send('library:changed',store.library(currentUid));};
+async function continueHistory(){const state=historyContinuation;if(!state||state.uid!==currentUid||quitting)return;
+  try{const page=await supervisor.request<RemoteHistoryPage>('/account/history?limit=100&cursor='+encodeURIComponent(state.cursor));if(historyContinuation!==state||state.uid!==currentUid)return;
+    if(page.items.length){await store.merge(state.uid,page.items.map(item=>({...item,uid:state.uid})),null);emitLibrary();}
+    if(page.warning&&page.nextCursor===state.cursor){state.failures++;if(state.failures<=3)historyTimer=setTimeout(continueHistory,30000);return;}
+    if(page.hasMore&&page.nextCursor){state.cursor=page.nextCursor;state.failures=0;historyTimer=setTimeout(continueHistory,5000);}else historyContinuation=null;
+  }catch{state.failures++;if(historyContinuation===state&&state.failures<=3)historyTimer=setTimeout(continueHistory,30000);}
+}
 const retries=new Map<string,{attempt:number;next:number}>();
 const liveWrites=new Map<string,number>();
 let pumping=false;
+let firstCatalogShown=false,startupSyncTimer:ReturnType<typeof setTimeout>|undefined;
+const startLibrarySync=()=>{clearTimeout(startupSyncTimer);if(currentUid==='local'||quitting)return;void syncLibrary().then(result=>{if(window&&!window.isDestroyed())window.webContents.send('library:changed',result.library);}).catch(()=>{});};
 function windowIcon(){return nativeImage.createFromPath(path.join(app.getAppPath(),'assets','icon.png'));}
 function setBossKey(settings:Settings){globalShortcut.unregisterAll();if(settings.bossKey){const ok=globalShortcut.register(settings.bossKey,()=>{if(window.isVisible()&&window.isFocused())window.hide();else{window.show();window.focus();}});if(!ok)throw new Error('老板键已被其他程序占用，请换一组快捷键');}}
 function assertSender(event:Electron.IpcMainInvokeEvent){if(event.sender!==window.webContents)throw new Error('无效请求来源');}
 const allowed=/^\/(health|catalog\/(home|search|rank|browse|comments|series\/\d+)|account\/(session|send-code|login|logout|history|favorites|progress|favorite|mfa\/(send|verify))|media\/(session(?:\/[a-zA-Z0-9_-]+)?|cache(?:\/(clear|settings))?))(\?[^\r\n#]*)?$/;
 function handle(channel:string,run:(...args:any[])=>unknown){ipcMain.handle(channel,(event,...args)=>{assertSender(event);return run(...args);});}
-async function refreshIdentity(){try{const s=await supervisor.request<Session>('/account/session');currentUid=s.loggedIn?s.uid:'local';if(window&&!window.isDestroyed())window.webContents.send('library:changed',store.library(currentUid));return s;}catch{return null;}}
+async function refreshIdentity(){try{const s=await supervisor.request<Session>('/account/session');const uid=s.loggedIn?s.uid:'local';if(window&&!window.isDestroyed()){window.webContents.send('session:changed',s);if(uid!==currentUid){currentUid=uid;window.webContents.send('library:changed',store.library(currentUid));}}else currentUid=uid;return s;}catch{return null;}}
 async function migrateLegacy(data:string){
   if(process.env.HG_TEST_DATA_DIR)return;
   const marker=path.join(data,'migration.json');try{await fs.access(marker);return;}catch{}
@@ -37,11 +49,15 @@ async function syncLibrary(){
   syncing=(async()=>{
     await refreshIdentity(); const uid=currentUid,warnings:string[]=[];
     if(uid==='local')return {library:store.library(uid),warnings};
-    const [h,f]=await Promise.allSettled([supervisor.request<{items:HistoryItem[]}>('/account/history'),supervisor.request<{items:Series[]}>('/account/favorites')]);
+    clearTimeout(historyTimer);historyContinuation=null;
+    const [h,f]=await Promise.allSettled([supervisor.request<RemoteHistoryPage>('/account/history?limit=100&refresh=true'),supervisor.request<{items:Series[]}>('/account/favorites')]);
     if(currentUid!==uid)return {library:store.library(currentUid),warnings:['账号已切换，已丢弃上次同步结果']};
     if(h.status==='rejected')warnings.push('云端历史暂时不可用，已保留本机记录');
     if(f.status==='rejected')warnings.push('云端收藏暂时不可用，已保留本机收藏');
-    return {library:await store.merge(uid,h.status==='fulfilled'?h.value.items.map(i=>({...i,uid})):[],f.status==='fulfilled'?f.value.items:null),warnings};
+    if(h.status==='fulfilled'&&h.value.warning)warnings.push(h.value.warning);
+    if(h.status==='fulfilled'&&h.value.hasMore&&h.value.nextCursor){historyContinuation={uid,cursor:h.value.nextCursor,failures:0};historyTimer=setTimeout(continueHistory,5000);warnings.push('最近记录已同步，较早记录正在后台补齐');}
+    const library=await store.merge(uid,h.status==='fulfilled'?h.value.items.map(i=>({...i,uid})):[],f.status==='fulfilled'?f.value.items:null);
+    return currentUid===uid?{library,warnings}:{library:store.library(currentUid),warnings:['账号已切换，已保留当前账号记录']};
   })();
   try{return await syncing;}finally{syncing=undefined;}
 }
@@ -88,9 +104,10 @@ async function boot(){
   window.on('hide',()=>window.webContents.send('window:visibility',false));
   window.on('show',()=>window.webContents.send('window:visibility',true));
   tray=new Tray(windowIcon());tray.setToolTip('红果桌面');tray.setContextMenu(Menu.buildFromTemplate([{label:'打开红果桌面',click:()=>{window.show();window.focus();}},{type:'separator'},{label:'退出',click:()=>app.quit()}]));tray.on('double-click',()=>{window.show();window.focus();});
-  handle('api:request',async(route:string,options={})=>{if(typeof route!=='string'||!allowed.test(route)||route.length>3000)throw new Error('无效接口');if(JSON.stringify(options).length>100000)throw new Error('请求内容过大');const result=await supervisor.request(route,options);if(route.startsWith('/account/session')||route==='/account/login'||route==='/account/logout')await refreshIdentity();return result;});
+  handle('api:request',async(route:string,options={})=>{if(typeof route!=='string'||!allowed.test(route)||route.length>3000)throw new Error('无效接口');if(JSON.stringify(options).length>100000)throw new Error('请求内容过大');const result=await supervisor.request(route,options);if(route.startsWith('/catalog/')&&!firstCatalogShown){firstCatalogShown=true;startupSyncTimer=setTimeout(startLibrarySync,500);}if(route==='/account/login'||route==='/account/logout'||route==='/account/mfa/verify')await refreshIdentity();return result;});
   handle('settings:get',()=>store.settings());handle('settings:save',async(value:Partial<Settings>)=>{const old=store.settings();const settings=await store.saveSettings(value);if(value.bossKey!==undefined&&value.bossKey!==old.bossKey){try{setBossKey(settings);}catch(e){await store.saveSettings({bossKey:old.bossKey});try{setBossKey(old);}catch{}throw e;}}nativeTheme.themeSource=settings.theme;if(value.cacheGB!==undefined)await supervisor.request('/media/cache/settings',{method:'POST',body:{cacheGB:settings.cacheGB}}).catch(()=>{});return settings;});
   handle('library:get',()=>store.library(currentUid));handle('library:progress',async(value:PlaybackProgress)=>{const uid=currentUid;const item=await store.progress(uid,value);if(uid!=='local'){liveWrites.set(uid+':'+value.series.id,item.watchedAt);void pump();}});
+  handle('history:query',(query:HistoryQuery={})=>store.historyPage(currentUid,query));
   handle('library:favorite',async(series:Series)=>{const uid=currentUid;const favorite=await store.favorite(uid,series);if(uid!=='local'){try{await supervisor.request('/account/favorite',{method:'POST',body:{seriesId:series.id,favorite,expectedUid:uid}});}catch{await store.favorite(uid,series);throw new Error('收藏同步失败，已恢复原状态，请重试');}}return store.library(currentUid);});
   handle('library:remove',(id:string)=>store.remove(currentUid,id));handle('library:sync',syncLibrary);
   handle('window:action',(action:string)=>{if(action==='minimize')window.minimize();else if(action==='maximize')window.isMaximized()?window.unmaximize():window.maximize();else if(action==='close')window.close();else if(action==='quit')app.quit();else if(action==='fullscreen')window.setFullScreen(!window.isFullScreen());else if(action==='exitfullscreen'){const fullscreen=window.isFullScreen();if(fullscreen)window.setFullScreen(false);return fullscreen;}});
@@ -99,15 +116,15 @@ async function boot(){
   handle('update:check',updateInfo);handle('update:download',downloadUpdate);
   nativeTheme.themeSource=store.settings().theme;try{setBossKey(store.settings());}catch{}
   await window.loadFile(path.join(app.getAppPath(),'dist','index.html'));
-  void supervisor.start().then(async()=>{await migrateLegacy(data);const session=await refreshIdentity();if(session?.loggedIn){const result=await syncLibrary();if(!window.isDestroyed())window.webContents.send('library:changed',result.library);}}).catch(()=>{});
+  void supervisor.start().then(async()=>{await migrateLegacy(data);const session=await refreshIdentity();if(session?.loggedIn){startupSyncTimer=setTimeout(startLibrarySync,firstCatalogShown?500:8000);}}).catch(()=>{});
   const timer=setInterval(()=>void pump(),5000);timer.unref();
 }
 if(!app.requestSingleInstanceLock())app.quit();else{
   app.on('second-instance',()=>{if(window){window.show();window.focus();}});
   app.whenReady().then(boot).catch(async(error)=>{await dialog.showMessageBox({type:'error',message:'客户端启动失败',detail:String(error.message)});app.quit();});
-  app.on('before-quit',event=>{if(quitting)return;event.preventDefault();quitting=true;globalShortcut.unregisterAll();
+  app.on('before-quit',event=>{if(quitting)return;event.preventDefault();quitting=true;clearTimeout(startupSyncTimer);clearTimeout(historyTimer);globalShortcut.unregisterAll();
     const flushRenderer=new Promise<void>(resolve=>{if(!window||window.isDestroyed()){resolve();return;}const listener=(e:Electron.IpcMainEvent)=>{if(e.sender===window.webContents){clearTimeout(timer);ipcMain.removeListener('app:flushed',listener);resolve();}};const timer=setTimeout(()=>{ipcMain.removeListener('app:flushed',listener);resolve();},1500);ipcMain.on('app:flushed',listener);window.webContents.send('app:flush');});
-    void flushRenderer.then(()=>store?.flush()).then(()=>supervisor?.stop()).finally(()=>app.quit());
+    void flushRenderer.then(()=>store?.flush()).then(()=>supervisor?.stop()).finally(()=>{store?.close();app.quit();});
   });
   app.on('window-all-closed',()=>{if(!store?.settings().closeToTray)app.quit();});
 }

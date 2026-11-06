@@ -48,7 +48,7 @@ function readLibrary(db: DatabaseSync, uid: string): Library {
   const historyColumns = columns(db, 'history');
   if (['series_id', 'series_json', 'last_episode', 'updated_at'].every(key => historyColumns.has(key))) {
     const optional = ['position', 'duration', 'watched_at'].filter(key => historyColumns.has(key));
-    const rows = db.prepare(`SELECT series_id,series_json,last_episode,updated_at${optional.length ? ',' + optional.join(',') : ''} FROM history ORDER BY updated_at DESC LIMIT 10000`).all() as Row[];
+    const rows = db.prepare(`SELECT series_id,series_json,last_episode,updated_at${optional.length ? ',' + optional.join(',') : ''} FROM history ORDER BY updated_at DESC`).all() as Row[];
     for (const row of rows) {
       const item = series(row); if (!item) continue;
       const data = parse(row.series_json) || {};
@@ -64,7 +64,7 @@ function readLibrary(db: DatabaseSync, uid: string): Library {
     const rows = db.prepare(`SELECT series_id,series_json FROM favorites${order} LIMIT 10000`).all() as Row[];
     for (const row of rows) { const item = series(row); if (item) favorites.push(item); }
   }
-  return { history: [...new Map(history.sort((a, b) => b.watchedAt - a.watchedAt).map(item => [item.series.id, item])).values()].slice(0, 1000),
+  return { history: [...new Map(history.sort((a, b) => a.watchedAt - b.watchedAt).map(item => [item.series.id, item])).values()].sort((a,b)=>b.watchedAt-a.watchedAt),
     favorites: [...new Map(favorites.map(item => [item.id, item])).values()].slice(0, 1000) };
 }
 

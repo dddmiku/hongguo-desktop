@@ -18,7 +18,7 @@ REPO = OWNER + "/hongguo-desktop"
 LEGACY = OWNER + "/hongguo-desktop-releases"
 VERSION = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
 # 仅供旧 1.9.x 更新器比较与固定文件名使用，不是新客户端版本。
-LEGACY_BRIDGE_VERSION = "1.9.10"
+LEGACY_BRIDGE_VERSION = "1.9.11"
 
 
 def token():
@@ -100,7 +100,7 @@ def push_source(secret):
     git("add", ".")
     changed = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=ROOT).returncode
     if changed:
-        git("commit", "-m", "feat: independent desktop player, account-safe sync and legacy migration")
+        git("commit", "-m", "fix: fullscreen playback, instant catalog and seamless episode transitions")
     env = dict(os.environ, HG_GITHUB_TOKEN=secret, GIT_ASKPASS=str(ROOT / "tools/git-askpass.cmd"), GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")
     route = proxy()
     args = ["-c", "credential.helper="]
@@ -187,9 +187,12 @@ def publish(secret, legacy=False):
     latest = out / ("legacy-latest.json" if legacy else "latest.json")
     latest.write_text(json.dumps(feed, ensure_ascii=False, indent=2), encoding="utf-8")
     checksums = out / ("LEGACY_SHA256SUMS.txt" if legacy else "SHA256SUMS.txt")
-    checksums.write_text("\n".join(hashlib.sha256(a.read_bytes()).hexdigest() + "  " + a.name for a in ((bridge_installer,) if legacy else (installer, archive))), encoding="utf-8")
+    runtime_manifest = json.loads((ROOT / "runtime-manifest.json").read_text(encoding="utf-8"))
+    publish_runtime = runtime_manifest["version"] == VERSION
+    public_assets = [installer, archive] if publish_runtime else [installer]
+    checksums.write_text("\n".join(hashlib.sha256(a.read_bytes()).hexdigest() + "  " + a.name for a in ((bridge_installer,) if legacy else public_assets)), encoding="utf-8")
     if not legacy:
-        make_release(REPO, [installer, archive, latest, checksums], notes, secret)
+        make_release(REPO, [*public_assets, latest, checksums], notes, secret)
     else:
         migration_notes = "新版客户端已迁移到独立公开源码仓库 [hongguo-desktop](https://github.com/%s)。\n\n" % REPO
         migration_notes += "旧客户端可以直接检查更新并下载安装。首次启动会只读导入旧账号、历史和收藏，旧安装和数据保留。\n\n" + notes

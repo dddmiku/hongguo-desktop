@@ -6,13 +6,14 @@
 
 ## 安装与使用
 
-在 [GitHub Releases](https://github.com/dddmiku/hongguo-desktop/releases) 下载 `hongguo-1.0.0-setup.exe`，按向导安装。安装包自带播放所需运行时，无需另装 Python、Java 或 FFmpeg。
+在 [GitHub Releases](https://github.com/dddmiku/hongguo-desktop/releases) 下载最新 `hongguo-*-setup.exe`，按向导安装。安装包自带播放所需运行时，无需另装 Python、Java 或 FFmpeg。
 
 常用功能：
 
 - 发现、推荐、排行榜与片库探索，支持真人短剧、漫剧和 AI 剧筛选。
 - 搜索、剧集详情、选集播放、画质和倍速切换、自动连播及后续剧集预取。
 - 本地观看记录与收藏；登录后读取并同步账号数据。
+- 观看历史完整保存到 SQLite，按真实时间分组，可搜索、筛选及分页，不按固定条数淘汰。
 - 评论、窗口与托盘操作、老板键、缓存限额和清理、诊断导出与更新检查。
 
 题材、评论和可选画质以实际片源及上游接口为准。无网络时可查看本机记录；首次播放与在线同步仍需要联网。

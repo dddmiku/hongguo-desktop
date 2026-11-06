@@ -292,14 +292,7 @@ class MediaManager:
             metadata = {"owner": _OWNER, "seriesId": job.series_id,
                         "episode": job.episode, "quality": job.quality}
             (job.directory / "complete.json").write_text(json.dumps(metadata), encoding="utf-8")
-            with self.guard:
-                if job.stop.is_set():
-                    raise MediaCancelled()
-                destination = self.root / job.key
-                job.directory.rename(destination)
-                job.directory = destination
-                job.phase = "complete"
-                job.accessed = time.time()
+            self._promote(job)
         except Exception as error:
             with self.guard:
                 job.phase = "cancelled" if job.stop.is_set() or isinstance(error, MediaCancelled) else "error"
@@ -321,6 +314,29 @@ class MediaManager:
                     except Exception:
                         pass
             job.ready.set()
+
+    def _promote(self, job):
+        """Windows 扫描/读句柄短暂未分享DELETE时，保留完整产物等待其释放。"""
+        destination = self.root / job.key
+        deadline = time.monotonic() + 1.0
+        while True:
+            with self.guard:
+                if job.stop.is_set():
+                    raise MediaCancelled()
+                try:
+                    job.directory.rename(destination)
+                except PermissionError as error:
+                    # 仅重试 Windows 共享/锁冲突，DACL拒绝(5)等权限错误仍立即失败。
+                    if getattr(error, "winerror", None) not in (32, 33) or time.monotonic() >= deadline:
+                        raise
+                else:
+                    job.directory = destination
+                    job.phase = "complete"
+                    job.accessed = time.time()
+                    return
+            # 等待期间不占管理锁，manifest可继续读取，取消可以立即生效。
+            if job.stop.wait(min(0.05, max(0, deadline - time.monotonic()))):
+                raise MediaCancelled()
 
     def _mark_ready(self, job):
         with self.guard:

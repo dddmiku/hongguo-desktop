@@ -98,8 +98,8 @@ def create_app(provider, token, media_manager=None, signer_ok=lambda: True):
 
     @app.get("/catalog/home")
     def home(genre: str = Query("short_play", max_length=32), cursor: str = Query("", max_length=1024),
-             mode: str = Query("discover", max_length=32)):
-        return provider.home(genre, cursor, mode)
+             mode: str = Query("discover", max_length=32), refresh: bool = Query(False)):
+        return provider.home(genre, cursor, mode, refresh=refresh)
 
     @app.get("/catalog/search")
     def search(q: str = Query(..., min_length=1, max_length=80)):
@@ -152,8 +152,8 @@ def create_app(provider, token, media_manager=None, signer_ok=lambda: True):
         return provider.import_session(payload.get("session"))
 
     @app.get("/account/history")
-    def history():
-        return provider.history()
+    def history(cursor: str = Query("", max_length=2048), limit: int = Query(100, ge=1, le=500), refresh: bool = Query(False)):
+        return provider.history(cursor, limit, refresh)
 
     @app.get("/account/favorites")
     def favorites():

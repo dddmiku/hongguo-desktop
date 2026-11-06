@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import ctypes
 import hashlib
+import hmac
 import importlib
 import ipaddress
 import json
@@ -24,6 +25,7 @@ import time
 from urllib.parse import urlsplit
 
 import requests
+from progress_contract import build_progress_item, epoch_seconds, mobile_position_seconds
 
 
 GENRES = {"short_play", "comic_series", "ai_series"}
@@ -172,6 +174,150 @@ class RequestCache:
         with self.condition:
             self.values.clear()
 
+    def invalidate(self, key):
+        with self.condition:
+            self.values.pop(key, None)
+
+
+class CatalogCache:
+    """Public discovery only: validated disk cache, single refresh and stale-on-error."""
+    def __init__(self, path, capacity=12, max_age=3 * 86400):
+        self.path, self.capacity, self.max_age = Path(path), capacity, max_age
+        self.values = OrderedDict()
+        self.running, self.errors, self.retry_at = set(), {}, {}
+        self.condition = threading.Condition()
+        self.closed = False
+        try:
+            if self.path.stat().st_size > 1024 * 1024:
+                return
+            saved = json.loads(self.path.read_text(encoding="utf-8"))
+            if saved.get("schema") != 1 or not isinstance(saved.get("entries"), dict):
+                return
+            now = time.time()
+            for key, entry in list(saved["entries"].items())[-capacity:]:
+                if key not in {"discover:" + genre for genre in GENRES} or not isinstance(entry, dict):
+                    continue
+                at = float(entry.get("at", 0))
+                if not math.isfinite(at) or not 0 <= now - at <= max_age:
+                    continue
+                items = self._items(entry.get("items"))
+                if items:
+                    self.values[key] = {"at": at, "items": items}
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+
+    @staticmethod
+    def _items(rows):
+        if not isinstance(rows, list):
+            return []
+        values, seen = [], set()
+        for row in rows[:100]:
+            if not isinstance(row, dict):
+                continue
+            try:
+                value = normalize_series(row)
+            except (ProviderError, TypeError, ValueError):
+                continue
+            if value["id"] not in seen:
+                seen.add(value["id"])
+                values.append(value)
+        return values
+
+    def _persist(self):
+        now = time.time()
+        for key in list(self.values):
+            if now - self.values[key]["at"] > self.max_age:
+                self.values.pop(key, None)
+        while len(self.values) > self.capacity:
+            self.values.popitem(last=False)
+        pending = self.path.with_suffix(".json.part")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            pending.write_text(json.dumps({"schema": 1, "entries": self.values}, ensure_ascii=False), encoding="utf-8")
+            pending.replace(self.path)
+        except OSError:
+            # Discovery remains usable when the cache directory cannot be written.
+            pass
+        finally:
+            try:
+                pending.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _view(self, key, cached=True):
+        entry = self.values[key]
+        return {"items": entry["items"], "cached": cached,
+                "stale": time.time() - entry["at"] >= 120,
+                "updating": key in self.running, "updatedAt": entry["at"],
+                **({"warning": self.errors[key]} if key in self.errors else {})}
+
+    def _fetch(self, key, loader):
+        try:
+            items = self._items(loader())
+            if not items:
+                raise ProviderError("CATALOG_EMPTY", "当前片单暂时不可用，请稍后刷新")
+            with self.condition:
+                if self.closed:
+                    raise ProviderError("SERVICE_STOPPING", "播放服务正在退出", 503)
+                self.values[key] = {"at": time.time(), "items": items}
+                self.values.move_to_end(key)
+                self.errors.pop(key, None)
+                self.retry_at.pop(key, None)
+                self._persist()
+        except Exception:
+            with self.condition:
+                self.errors[key] = "片单更新暂时失败，已保留上次内容"
+                self.retry_at[key] = time.monotonic() + 10
+            raise
+        finally:
+            with self.condition:
+                self.running.discard(key)
+                self.condition.notify_all()
+
+    def get(self, key, loader, refresh=False):
+        with self.condition:
+            if self.closed:
+                raise ProviderError("SERVICE_STOPPING", "播放服务正在退出", 503)
+            entry = self.values.get(key)
+            if entry and time.time() - entry["at"] > self.max_age:
+                self.values.pop(key, None)
+                entry = None
+            if entry and not refresh:
+                self.values.move_to_end(key)
+                if (time.time() - entry["at"] >= 120 and key not in self.running
+                        and time.monotonic() >= self.retry_at.get(key, 0)):
+                    self.running.add(key)
+                    def update():
+                        try:
+                            self._fetch(key, loader)
+                        except Exception:
+                            pass
+                    threading.Thread(target=update, name="catalog-refresh", daemon=True).start()
+                return self._view(key)
+            if key in self.running:
+                while key in self.running and not self.closed:
+                    self.condition.wait(1)
+                if self.closed:
+                    raise ProviderError("SERVICE_STOPPING", "播放服务正在退出", 503)
+                if key in self.values:
+                    return self._view(key)
+                raise ProviderError("CATALOG_UNAVAILABLE", "当前片单暂时不可用，请重试")
+            self.running.add(key)
+        try:
+            self._fetch(key, loader)
+        except Exception:
+            with self.condition:
+                if key in self.values:
+                    return self._view(key)
+            raise
+        with self.condition:
+            return self._view(key, cached=False)
+
+    def close(self):
+        with self.condition:
+            self.closed = True
+            self.condition.notify_all()
+
 
 class Provider:
     def __init__(self, data_dir: Path, sdk=None, account=None):
@@ -180,6 +326,7 @@ class Provider:
         self.source_dir.mkdir(parents=True, exist_ok=True)
         self.sdk, self.account = sdk, account
         self.cache = RequestCache()
+        self.catalog_cache = CatalogCache(self.data_dir / "catalog-cache.json")
         self._source_guard = threading.Condition()
         self._sources_running = set()
         self._leases = {}
@@ -187,6 +334,7 @@ class Provider:
         self._last_progress = {}
         self._cooldown_until = 0.0
         self._closed = threading.Event()
+        self._history_cursor_key = secrets.token_bytes(32)
 
     @classmethod
     def from_runtime(cls, data_dir, runtime_dir, signer_url):
@@ -259,14 +407,15 @@ class Provider:
                 result.append(series)
         return result
 
-    def home(self, genre="short_play", cursor="", mode="discover"):
+    def home(self, genre="short_play", cursor="", mode="discover", refresh=False):
         self._genre(genre)
         if mode not in {"discover", "recommend"}:
             raise ProviderError("INPUT_INVALID", "推荐页面不正确", 400)
         if mode == "discover" or genre != "short_play":
-            items = self.cache.get(("home", genre, mode), 120,
-                lambda: self._read("读取推荐", lambda: self._list(self.sdk.browse(genre, sort="hot_score", max_items=30))))
-            return {"items": items, "hasMore": False, "cursor": ""}
+            page = self.catalog_cache.get("discover:" + genre,
+                lambda: self._read("读取片单", lambda: self._list(self.sdk.browse(genre, sort="hot_score", max_items=30))),
+                refresh=refresh)
+            return {**page, "hasMore": False, "cursor": ""}
         session, offset = "", 0
         if cursor:
             try:
@@ -278,6 +427,8 @@ class Provider:
                     raise ValueError()
             except Exception:
                 raise ProviderError("INPUT_INVALID", "推荐游标已失效，请刷新", 400) from None
+        if refresh and not cursor:
+            self.cache.invalidate(("home", mode, cursor))
         response = self.cache.get(("home", mode, cursor), 30,
             lambda: self._read("读取推荐", lambda: self.sdk.feed(session=session, offset=offset, limit=18)))
         items = self._list(response.get("items"))
@@ -512,19 +663,106 @@ class Provider:
             self._last_progress.clear()
         return self.session()
 
-    def history(self):
+    def _history_cursor(self, state):
+        encoded = base64.urlsafe_b64encode(json.dumps(state, separators=(",", ":")).encode()).decode().rstrip("=")
+        digest = hmac.new(self._history_cursor_key, encoded.encode(), hashlib.sha256).hexdigest()
+        return encoded + "." + digest
+
+    def _history_state(self, cursor, uid, identity):
+        initial = {"v": 1, "uid": uid, "identity": identity, "offset": 0, "previous": "", "page": 0}
+        if not cursor:
+            return initial
+        try:
+            if not isinstance(cursor, str) or len(cursor) > 2048:
+                raise ValueError()
+            encoded, digest = cursor.rsplit(".", 1)
+            expected = hmac.new(self._history_cursor_key, encoded.encode(), hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(digest, expected):
+                raise ValueError()
+            state = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+            if (state.get("v") != 1 or not isinstance(state.get("offset"), int)
+                    or not 0 <= state["offset"] <= 1000000 or not isinstance(state.get("page"), int)
+                    or not 0 <= state["page"] <= 100 or not re.fullmatch("[a-f0-9]{64}", state.get("previous", ""))):
+                raise ValueError()
+            if state.get("uid") != uid or state.get("identity") != identity:
+                raise ProviderError("ACCOUNT_CHANGED", "账号已切换，请重新同步历史", 409)
+            return state
+        except ProviderError:
+            raise
+        except (ValueError, TypeError, AttributeError, KeyError):
+            raise ProviderError("HISTORY_CURSOR_INVALID", "历史同步位置已失效，请重新同步", 400) from None
+
+    def history(self, cursor="", limit=100, refresh=False):
+        """Read one real server page, retaining every returned row and original times."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ProviderError("INPUT_INVALID", "历史页大小不正确", 400)
         session = self._require_login()
+        credentials = dict(self.account.load_session() or {})
+        identity = self.account._session_identity(credentials)
+        state = self._history_state(cursor, session["uid"], identity)
+        key = ("history-page", session["uid"], identity, state["offset"], limit)
+        if refresh:
+            self.cache.invalidate(key)
         def read():
-            response = self.account.remote_history(limit=100)
-            if not response.get("ok"):
-                raise ProviderError("HISTORY_UNAVAILABLE", "云端历史暂时无法读取，请稍后重试")
-            if self.session()["uid"] != session["uid"]:
+            response = self.account.remote_history_page(offset=state["offset"], limit=limit, session=credentials)
+            if (response.get("accountChanged") or self.account._account_changed(credentials)
+                    or self.session()["uid"] != session["uid"]):
                 raise ProviderError("ACCOUNT_CHANGED", "账号已切换，请重新同步", 409)
-            return [{"series": normalize_series({**row, "id": row.get("seriesId"), "episodeCount": row.get("total")}),
-                     "episode": number(row.get("episode"), 1), "position": number(row.get("position")),
-                     "duration": 0, "watchedAt": number(row.get("updatedAt")), "uid": session["uid"]}
-                    for row in response.get("items") or []]
-        return {"items": self.cache.get(("history", session["uid"]), 15, lambda: self._read("读取历史", read))}
+            if not response.get("ok"):
+                raise ProviderError("HISTORY_UNAVAILABLE", "云端历史暂时无法读取，请稍后继续同步")
+            return response
+        try:
+            response = self.cache.get(key, 15, lambda: self._read("读取历史", read))
+        except ProviderError as error:
+            if not cursor or error.code == "ACCOUNT_CHANGED":
+                raise
+            return {"items": [], "total": 0, "hasMore": True, "nextCursor": cursor,
+                    "complete": False, "warning": "这页历史暂时未同步，已保留现有记录，可稍后继续"}
+        if self.account._account_changed(credentials) or self.session()["uid"] != session["uid"]:
+            raise ProviderError("ACCOUNT_CHANGED", "账号已切换，请重新同步", 409)
+        raw = response.get("items") or []
+        if not isinstance(raw, list):
+            raise ProviderError("HISTORY_UNAVAILABLE", "云端历史格式暂时不可用")
+        fingerprint = str(response.get("fingerprint") or hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest())
+        if state["previous"] and fingerprint == state["previous"]:
+            return {"items": [], "total": number(response.get("total")), "hasMore": False,
+                    "nextCursor": None, "complete": False,
+                    "warning": "服务端重复返回上一页，已保留当前历史，请稍后重新同步"}
+        items = {}
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            sid = row.get("book_id_str") or row.get("book_id") or row.get("seriesId")
+            try:
+                series = normalize_series({**row, "id": sid, "episodeCount": row.get("episode_cnt") or row.get("total")})
+            except (ProviderError, TypeError, ValueError):
+                continue
+            try:
+                stamp = max(0, float(row.get("read_timestamp_ms") if "read_timestamp_ms" in row else row.get("updatedAt") or 0))
+                if not math.isfinite(stamp):
+                    stamp = 0
+                if "read_timestamp_ms" in row or stamp > 1e12:
+                    stamp /= 1000
+            except (TypeError, ValueError, OverflowError):
+                stamp = 0
+            item = {"series": series,
+                    "episode": number(row.get("vid_index") or row.get("chapter_index") or row.get("episode"), 1),
+                    "position": mobile_position_seconds(row.get("current_play_position") or row.get("position") or 0),
+                    # Mobile `duration` may describe the entire series, not this episode.
+                    "duration": 0, "watchedAt": stamp, "uid": session["uid"]}
+            previous = items.get(series["id"])
+            if previous is None or item["watchedAt"] > previous["watchedAt"]:
+                items[series["id"]] = item
+        has_more = bool(raw) and bool(response.get("hasMore"))
+        warning = ""
+        if has_more and state["page"] >= 100:
+            has_more = False
+            warning = "本轮历史同步请求较多，已保留所有已收到记录，可稍后重新同步"
+        next_cursor = self._history_cursor({**state, "offset": number(response.get("nextOffset"), state["offset"] + len(raw)),
+                    "previous": fingerprint, "page": state["page"] + 1}) if has_more else None
+        return {"items": sorted(items.values(), key=lambda item: item["watchedAt"], reverse=True),
+                "total": number(response.get("total")), "hasMore": has_more, "nextCursor": next_cursor,
+                "complete": not has_more and not warning, **({"warning": warning} if warning else {})}
 
     def favorites(self):
         session = self._require_login()
@@ -550,10 +788,10 @@ class Provider:
         series = payload.get("series") or {}
         sid = identifier(series.get("id"))
         episode = number(payload.get("episode"))
-        position, duration = number(payload.get("position")), number(payload.get("duration"))
+        position, duration = float(payload.get("position") or 0), float(payload.get("duration") or 0)
         intent = payload.get("intent", "active")
-        watched_at = number(payload.get("watchedAt"), int(time.time() * 1000))
-        if not 1 <= episode <= 100000 or intent not in {"active", "replay", "backfill"} or watched_at > int(time.time() * 1000) + 60000:
+        watched_at = epoch_seconds(payload.get("watchedAt"))
+        if not 1 <= episode <= 100000 or intent not in {"active", "replay", "backfill"} or watched_at > time.time() + 60:
             raise ProviderError("INPUT_INVALID", "播放进度格式不正确", 400)
         if position > 86400 or duration > 86400:
             raise ProviderError("INPUT_INVALID", "播放进度超出有效范围", 400)
@@ -579,17 +817,15 @@ class Provider:
                 cloud = self._read("核对云端进度", lambda: self.account.remote_progress(sid))
                 if not cloud.get("ok"):
                     raise ProviderError("CLOUD_READ_FAILED", "暂时读不到云端进度，已跳过旧进度重试")
-                if (number(cloud.get("updatedAt")) > watched_at or number(cloud.get("episode")) > episode
-                        or (number(cloud.get("episode")) == episode and number(cloud.get("position")) > position)):
+                if (epoch_seconds(cloud.get("updatedAt") or 0) > watched_at or number(cloud.get("episode")) > episode
+                        or (number(cloud.get("episode")) == episode and mobile_position_seconds(cloud.get("position") or 0) > position)):
                     return {"synced": True, "skipped": True, "reason": "云端进度已更新，已忽略旧进度重试"}
-            target = next((row for row in self.detail(sid)["episodes"] if row["index"] == episode), None)
+            detail = self.detail(sid)
+            target = next((row for row in detail["episodes"] if row["index"] == episode), None)
             if not target:
                 raise ProviderError("EPISODE_NOT_FOUND", "这集不存在", 404)
-            item = {"book_id": int(sid), "book_type": 2, "vid": int(target["vid"]), "vid_index": episode,
-                    "chapter_index": episode, "current_play_position": position, "last_play_duration": duration,
-                    "read_timestamp_ms": watched_at, "update_timestamp_ms": 0,
-                    "use_soft_delete": False, "genre_type": 2150, "book_name": str(series.get("title") or "")[:120],
-                    "thumb_url": str(series.get("cover") or "")[:400]}
+            item = build_progress_item(series, episode, target["vid"], position, duration, watched_at,
+                                       detail["series"].get("totalEpisodes") or len(detail["episodes"]))
             if self.account._account_changed(session):
                 raise ProviderError("ACCOUNT_CHANGED", "账号已切换，已取消旧账号的同步", 409)
             result = self._read("同步播放进度", lambda: self.account._json(self.account._call(
@@ -772,5 +1008,6 @@ class Provider:
 
     def close(self):
         self._closed.set()
+        self.catalog_cache.close()
         with self._source_guard:
             self._source_guard.notify_all()

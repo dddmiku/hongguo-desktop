@@ -8,6 +8,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi import FastAPI
@@ -152,6 +153,126 @@ class MediaTests(unittest.TestCase):
         retry = manager.create("12345678", 1)
         wait_for(lambda: manager.pending == 0)
         self.assertEqual(manager.get(retry["id"])["phase"], "complete")
+
+    def test_windows_directory_sharing_handle_retries_only_promotion(self):
+        manager = self.manager()
+        blocked, errors, attempts = {}, [], []
+        original_ready, original_rename = manager._mark_ready, Path.rename
+        kernel = None
+        if sys.platform == "win32":
+            import ctypes
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                                          ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+            kernel.CreateFileW.restype = ctypes.c_void_p
+            kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+            kernel.CloseHandle.restype = ctypes.c_int
+
+        def ready(job):
+            result = original_ready(job)
+            if result and not blocked:
+                blocked["path"] = job.directory
+                if kernel is not None:
+                    # 真正的Windows目录句柄：READ/WRITE共享，但不允许DELETE/rename。
+                    handle = kernel.CreateFileW(str(job.directory), 1, 3, None, 3, 0x02000000, None)
+                    self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+                    blocked["handle"] = handle
+            return result
+
+        def rename(path, target):
+            if path == blocked.get("path"):
+                attempts.append(path)
+                try:
+                    if kernel is None and not errors:
+                        error = PermissionError(13, "fixture sharing violation", str(path))
+                        error.winerror = 32
+                        raise error
+                    return original_rename(path, target)
+                except PermissionError as error:
+                    errors.append(error)
+                    if kernel is not None and "handle" in blocked:
+                        kernel.CloseHandle(blocked.pop("handle"))
+                    raise
+            return original_rename(path, target)
+
+        manager._mark_ready = ready
+        try:
+            with patch.object(Path, "rename", rename):
+                session = manager.create("12345678", 1)
+                job = manager.sessions[session["id"]].job
+                self.assertTrue(job.done.wait(8))
+            self.assertEqual(manager.get(session["id"])["phase"], "complete")
+            self.assertEqual(len(errors), 1)
+            self.assertIn(errors[0].winerror, (32, 33))
+            self.assertEqual(Path(errors[0].filename), blocked["path"])
+            self.assertGreaterEqual(len(attempts), 2)
+            self.assertTrue(job.directory.joinpath("init.mp4").is_file())
+            self.assertEqual(manager.provider.calls, 1)
+        finally:
+            if kernel is not None and "handle" in blocked:
+                kernel.CloseHandle(blocked.pop("handle"))
+
+    def test_promotion_does_not_retry_real_permission_denied(self):
+        manager = self.manager()
+        original_rename = Path.rename
+        attempts = []
+
+        def rename(path, target):
+            if path.name.endswith(".part"):
+                attempts.append(path)
+                error = PermissionError(13, "fixture access denied", str(path))
+                error.winerror = 5
+                raise error
+            return original_rename(path, target)
+
+        with patch.object(Path, "rename", rename):
+            session = manager.create("12345678", 1)
+            self.assertTrue(manager.sessions[session["id"]].job.done.wait(8))
+        self.assertEqual(manager.get(session["id"])["phase"], "error")
+        self.assertEqual(len(attempts), 1)
+
+    def test_promotion_retry_is_cancelled_without_waiting_full_budget(self):
+        manager = self.manager()
+        original_rename = Path.rename
+        sharing = threading.Event()
+
+        def rename(path, target):
+            if path.name.endswith(".part"):
+                sharing.set()
+                error = PermissionError(13, "fixture sharing violation", str(path))
+                error.winerror = 32
+                raise error
+            return original_rename(path, target)
+
+        with patch.object(Path, "rename", rename):
+            session = manager.create("12345678", 1)
+            job = manager.sessions[session["id"]].job
+            self.assertTrue(sharing.wait(5))
+            manager.cancel(session["id"])
+            self.assertTrue(job.done.wait(1))
+        self.assertEqual(manager.get(session["id"])["phase"], "cancelled")
+
+    def test_persistent_sharing_conflict_has_bounded_retry_budget(self):
+        manager = self.manager()
+        original_rename = Path.rename
+        attempts = []
+
+        def rename(path, target):
+            if path.name.endswith(".part"):
+                attempts.append(time.monotonic())
+                error = PermissionError(13, "fixture persistent sharing violation", str(path))
+                error.winerror = 32
+                raise error
+            return original_rename(path, target)
+
+        with patch.object(Path, "rename", rename):
+            session = manager.create("12345678", 1)
+            job = manager.sessions[session["id"]].job
+            self.assertTrue(job.done.wait(3), "sharing retries did not stop")
+        self.assertEqual(manager.get(session["id"])["phase"], "error")
+        self.assertGreater(len(attempts), 1)
+        self.assertLess(attempts[-1] - attempts[0], 1.5)
+        self.assertFalse(job.directory.exists())
 
     def test_workers_and_queue_are_bounded(self):
         # 明确等首批4个worker同时进入source后再放行；不用sleep制造竞争窗口。

@@ -924,6 +924,46 @@ def remote_history(limit=30):
         items.append({'seriesId': str(it.get('book_id_str') or it.get('book_id') or ''), 'title': it.get('book_name') or '', 'cover': it.get('thumb_url') or '', 'episode': int(it.get('vid_index') or it.get('chapter_index') or 1), 'position': int(it.get('current_play_position') or 0), 'total': int(it.get('episode_cnt') or 0), 'updatedAt': int(it.get('read_timestamp_ms') or 0)})
     return {'ok': True, 'total': total or len(items), 'returned': len(items), 'items': items}
 
+
+def remote_history_page(offset=0, limit=100, session=None):
+    """One real upstream page; limit is a request hint, never a retained-record cap."""
+    session = dict(load_session() if session is None else session)
+    if not (session.get('cookie') or session.get('token')):
+        return {'ok': False, 'error': '未登录红果账号'}
+    if (isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 1000000
+            or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500):
+        return {'ok': False, 'error': '历史页码不正确'}
+    try:
+        response = _call('GET', '/reading/bookapi/read_history/list/v', extra={
+            'book_type': '2', 'offset': str(offset), 'limit': str(limit),
+            'query_soft_deleted': 'false', 'is_first_load': 'false',
+            'last_min_read_timestamp_ms': '0', 'full_field': 'false'}, session=session)
+        value = _json(response)
+    except Exception:
+        return {'ok': False, 'error': '云端历史暂时无法读取'}
+    if _account_changed(session):
+        return {'ok': False, 'accountChanged': True, 'error': '账号已切换'}
+    if value.get('code') not in (0, '0') or not isinstance(value.get('data'), dict):
+        return {'ok': False, 'error': '云端历史暂时无法读取'}
+    data = value['data']
+    raw = data.get('data_list') or []
+    if not isinstance(raw, list):
+        return {'ok': False, 'error': '云端历史格式不正确'}
+    try:
+        total = max(0, int(data.get('total') or 0))
+    except (TypeError, ValueError, OverflowError):
+        total = 0
+    # Some server versions ignore limit and return ~500 rows. Return all of them
+    # and advance by all consumed raw rows; slicing here would silently lose history.
+    next_offset = offset + len(raw)
+    more = bool(raw) and (next_offset < total if total else len(raw) >= limit)
+    if 'has_more' in data:
+        more = bool(raw) and data['has_more'] in (True, 1, '1', 'true')
+    fingerprint = hashlib.sha256('\n'.join(str(row.get('book_id_str') or row.get('book_id') or '')
+        if isinstance(row, dict) else '' for row in raw).encode('utf-8')).hexdigest()
+    return {'ok': True, 'items': raw, 'total': total, 'returned': len(raw),
+            'nextOffset': next_offset, 'hasMore': more, 'fingerprint': fingerprint}
+
 def push_local_history(items, limit=100):
     """把**本机**历史推到云端，让手机端也能看到（PC -> 手机 方向）。
 

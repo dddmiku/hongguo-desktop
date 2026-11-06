@@ -4,7 +4,9 @@ export interface Episode { index: number; vid: string; title: string; duration?:
 export interface SeriesDetail { series: Series; episodes: Episode[]; }
 export interface HistoryItem { series: Series; episode: number; position: number; duration: number; watchedAt: number; uid: string; }
 export interface Settings { theme: 'dark' | 'light' | 'system'; quality: string; rate: number; autoplay: boolean; volume: number; cacheGB: number; closeToTray: boolean; bossKey: string; }
-export interface Library { history: HistoryItem[]; favorites: Series[]; }
+export interface Library { history: HistoryItem[]; favorites: Series[]; historyTotal?: number; }
+export interface HistoryQuery { search?: string; period?: 'all' | 'today' | 'week' | 'month'; status?: 'all' | 'unfinished' | 'finished'; cursor?: string; limit?: number; }
+export interface HistoryPage { items: HistoryItem[]; total: number; nextCursor: string | null; }
 export interface Session { loggedIn: boolean; uid: string; nickname: string; avatar: string; mobile: string; }
 export interface Comment { id: string; text: string; nickname: string; avatar: string; likes: number; time: string; }
 export interface CommentsPage { items: Comment[]; total: number; cursor: number; hasMore: boolean; }
@@ -18,6 +20,7 @@ export interface NativeBridge {
   request<T>(path: string, options?: { method?: string; body?: unknown; timeout?: number }): Promise<T>;
   getSettings(): Promise<Settings>; saveSettings(value: Partial<Settings>): Promise<Settings>;
   getLibrary(): Promise<Library>; saveProgress(value: PlaybackProgress): Promise<void>;
+  getHistory(query?: HistoryQuery): Promise<HistoryPage>;
   toggleFavorite(series: Series): Promise<Library>; removeHistory(id: string): Promise<Library>;
   syncLibrary(): Promise<{ library: Library; warnings: string[] }>;
   window(action: 'minimize' | 'maximize' | 'close' | 'quit' | 'fullscreen' | 'exitfullscreen'): Promise<void | boolean>;
@@ -28,5 +31,6 @@ export interface NativeBridge {
   onShutdown(callback: () => Promise<void>): () => void;
   onLibrary(callback: (library: Library) => void): () => void;
   onSettings(callback: (settings: Settings) => void): () => void;
+  onSession(callback: (session: Session) => void): () => void;
 }
 declare global { interface Window { hongguo: NativeBridge; } }
