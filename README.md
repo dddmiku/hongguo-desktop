@@ -55,7 +55,7 @@ npm run package
 ```powershell
 npm run typecheck
 npm test
-python -m pip install -r service/requirements.txt httpx
+python -m pip install -r service/requirements.txt httpx2
 python -m unittest discover -s service/tests -v
 ```
 

@@ -1,8 +1,9 @@
 import Hls from 'hls.js';
 import type { MediaSession, NativeBridge } from '../../shared/contracts';
 import type { PlaybackTarget, PreparedDeck } from './SeamlessSwitcher';
+import {episodeDuration} from './timeline';
 
-export interface VideoDeck extends PreparedDeck { video: HTMLVideoElement; hls: Hls | null; sessionId: string; }
+export interface VideoDeck extends PreparedDeck { video: HTMLVideoElement; hls: Hls | null; sessionId: string; duration: number; }
 const aborted = () => new DOMException('Cancelled', 'AbortError');
 const wait = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
   const stop = () => { clearTimeout(timer); reject(aborted()); };
@@ -21,7 +22,7 @@ export class HlsDeckLoader {
     const previous = this.decks.get(index); if (previous) await previous.release();
     let sessionId = '', engine: Hls | null = null, released = false, settled = false,leaseTimer:ReturnType<typeof setInterval>|undefined;
     video.pause(); video.muted = true; video.volume = 0; video.style.visibility = 'visible';
-    const deck: VideoDeck = { index, target, video, hls: null, sessionId: '', release: () => {
+    const deck: VideoDeck = { index, target, video, hls: null, sessionId: '', duration:episodeDuration(0,target.duration),release: () => {
       if (released) return; released = true; clearInterval(leaseTimer);engine?.destroy();
       if (this.decks.get(index) === deck) { this.decks.delete(index); video.pause(); video.removeAttribute('src'); video.load(); }
       if (sessionId) void this.bridge.request(`/media/session/${sessionId}`, { method: 'DELETE' }).catch(() => {});
@@ -31,8 +32,8 @@ export class HlsDeckLoader {
     try {
       let session = await this.bridge.request<MediaSession>('/media/session', { method: 'POST', body: { seriesId: target.seriesId, episode: target.episode, quality: target.quality, start: target.start } });
       sessionId = session.id; deck.sessionId = session.id;
+      if (signal.aborted || released) { void this.bridge.request(`/media/session/${sessionId}`, { method: 'DELETE' }).catch(() => {}); throw aborted(); }
       leaseTimer=setInterval(()=>{if(!released)void this.bridge.request(`/media/session/${sessionId}`).catch(()=>{});},60000);
-      if (signal.aborted) { void this.bridge.request(`/media/session/${sessionId}`, { method: 'DELETE' }).catch(() => {}); throw aborted(); }
       const deadline = Date.now() + 120000;
       while (session.phase === 'preparing') {
         if (signal.aborted) throw aborted(); if (Date.now() > deadline) throw new Error('准备时间较长，请重试当前集');
@@ -40,6 +41,7 @@ export class HlsDeckLoader {
       }
       if (signal.aborted) throw aborted();
       if (session.phase === 'error' || session.phase === 'cancelled') throw new Error(session.error || '视频准备失败');
+      deck.duration=episodeDuration(session.duration,target.duration);
       await new Promise<void>((resolve, reject) => {
         let priming = false, frameId = 0;
         const timeout = setTimeout(() => finish(new Error('视频解码超时，请重试')), 120000);
@@ -52,6 +54,8 @@ export class HlsDeckLoader {
         const stop = () => finish(aborted());
         signal.addEventListener('abort', stop, { once: true });
         const ready = () => {
+          const complete=engine?.levels[engine.currentLevel]?.details?.live===false;
+          deck.duration=episodeDuration(deck.duration,target.duration,video.duration,complete);
           if (settled || priming || signal.aborted || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth) return;
           if (target.start > .1) {
             const complete = engine?.levels[engine.currentLevel]?.details?.live === false;
@@ -67,6 +71,7 @@ export class HlsDeckLoader {
         for (const name of ['loadeddata', 'loadedmetadata', 'durationchange', 'canplay', 'seeked']) video.addEventListener(name, ready);
         if (Hls.isSupported()) {
           engine = new Hls({ enableWorker: true, maxBufferLength: 25, maxMaxBufferLength: 60, backBufferLength: 20,
+            startPosition:0,lowLatencyMode:false,liveSyncDuration:86400,liveMaxLatencyDuration:Infinity,maxLiveSyncPlaybackRate:1,
             manifestLoadingMaxRetry: 8, fragLoadingMaxRetry: 8, manifestLoadingRetryDelay: 800, fragLoadingRetryDelay: 800 });
           deck.hls = engine;
           engine.on(Hls.Events.MANIFEST_PARSED, ready); engine.on(Hls.Events.LEVEL_UPDATED, ready);

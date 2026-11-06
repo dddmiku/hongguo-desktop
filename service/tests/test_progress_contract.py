@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from progress_contract import build_progress_item, epoch_seconds, mobile_position_seconds, seconds_to_ms
+from progress_contract import build_progress_item, build_playback_progress_item, epoch_seconds, mobile_position_seconds, seconds_to_ms
 
 
 class ProgressContractTests(unittest.TestCase):
@@ -32,6 +32,19 @@ class ProgressContractTests(unittest.TestCase):
         self.assertEqual(item["episode_cnt"], 99)
         self.assertFalse(item["is_delete"])
         self.assertFalse(item["use_soft_delete"])
+
+    def test_independent_mobile_resume_uses_same_real_viewing_action(self):
+        history = self.item(episode=20)
+        progress = build_playback_progress_item(history)
+        self.assertEqual(progress["book_id"], "12345678")
+        self.assertEqual(progress["item_id"], "23456789")
+        self.assertEqual(progress["book_type"], 2)
+        self.assertEqual(progress["vid_index"], 20)
+        self.assertEqual(progress["read_timestamp_ms"], history["read_timestamp_ms"])
+        self.assertEqual(progress["current_play_time"], 27250)
+        self.assertEqual(progress["player_cumulative_total_duration"], 27250)
+        self.assertNotIn("duration", progress)
+        self.assertNotIn("current_play_position", progress)
 
     def test_mobile_readbacks_are_normalized_without_truncating_seconds(self):
         self.assertEqual(mobile_position_seconds(31171), 31.171)

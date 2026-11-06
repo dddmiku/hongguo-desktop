@@ -1,4 +1,4 @@
-export interface PlaybackTarget { seriesId: string; episode: number; quality: string; start: number; }
+export interface PlaybackTarget { seriesId: string; episode: number; quality: string; start: number; duration?: number; }
 export interface PreparedDeck { index: number; target: PlaybackTarget; release(): void | Promise<void>; }
 export interface DeckAdapter<T extends PreparedDeck> {
   prepare(index: number, target: PlaybackTarget, signal: AbortSignal): Promise<T>;

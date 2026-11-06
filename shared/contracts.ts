@@ -10,7 +10,7 @@ export interface HistoryPage { items: HistoryItem[]; total: number; nextCursor: 
 export interface Session { loggedIn: boolean; uid: string; nickname: string; avatar: string; mobile: string; }
 export interface Comment { id: string; text: string; nickname: string; avatar: string; likes: number; time: string; }
 export interface CommentsPage { items: Comment[]; total: number; cursor: number; hasMore: boolean; }
-export interface MediaSession { id: string; url: string; phase: 'preparing' | 'ready' | 'complete' | 'error' | 'cancelled'; error?: string; cached?: boolean; quality?: string; }
+export interface MediaSession { id: string; url: string; phase: 'preparing' | 'ready' | 'complete' | 'error' | 'cancelled'; error?: string; cached?: boolean; quality?: string; duration?: number; }
 export interface CacheStatus { bytes: number; limit: number; entries: number; active: number; }
 export interface Health { ok: boolean; version: string; signer: boolean; error?: string; }
 export interface PlaybackProgress { series: Series; episode: number; position: number; duration: number; }

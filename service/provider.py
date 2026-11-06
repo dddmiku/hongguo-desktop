@@ -25,7 +25,7 @@ import time
 from urllib.parse import urlsplit
 
 import requests
-from progress_contract import build_progress_item, epoch_seconds, mobile_position_seconds
+from progress_contract import build_playback_progress_item, build_progress_item, epoch_seconds, mobile_position_seconds
 
 
 GENRES = {"short_play", "comic_series", "ai_series"}
@@ -455,24 +455,63 @@ class Provider:
             return self._list(rows)
         return {"items": self.cache.get(("rank", board, genre), 120, lambda: self._read("读取排行榜", read))}
 
-    def browse(self, genre="short_play", sort="hot_score", theme=""):
+    def filters(self, genre="short_play"):
         self._genre(genre)
-        if sort not in SORTS or len(theme) > 80:
-            raise ProviderError("INPUT_INVALID", "筛选条件不正确", 400)
-        items = self.cache.get(("browse", genre, sort, theme), 120, lambda: self._read("读取片单",
-            lambda: self._list(self.sdk.browse(genre, sort=sort, theme=theme or None, max_items=50))))
         rows = self.cache.get(("filters", genre), 600, lambda: self._read("读取筛选条件", lambda: self.sdk.filters(genre)))
-        themes, theme_options = [], []
+        groups = []
+        labels = {"category_dim_theme": "题材", "category_dim_role": "设定", "category_dim_epoch": "背景"}
         for row in rows if isinstance(rows, list) else []:
-            if row.get("type") != "category_dim_theme":
+            if not isinstance(row, dict) or row.get("type") not in labels:
                 continue
-            for option in row.get("items") or []:
-                name = str(option.get("name") or "")
-                if name and name not in themes and name not in {"全部", "不限"}:
-                    themes.append(name)
-                    theme_options.append({"id": str(option.get("id") or name), "name": name})
-        filters = {"themes": themes, "themeOptions": theme_options}
-        return {"items": items, "filters": filters}
+            options, seen = [], set()
+            for option in (row.get("items") or [])[:160]:
+                if not isinstance(option, dict):
+                    continue
+                name, value = str(option.get("name") or "").strip()[:80], str(option.get("id") or "")
+                if name and name not in {"全部", "不限"} and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", value) and value not in seen:
+                    options.append({"id": value, "name": name})
+                    seen.add(value)
+            if options:
+                groups.append({"type": row["type"], "name": labels[row["type"]], "items": options})
+        themes = next((group["items"] for group in groups if group["type"] == "category_dim_theme"), [])
+        return {"items": [], "filters": {"themes": [item["name"] for item in themes],
+                                            "themeOptions": themes, "groups": groups}}
+
+    def browse(self, genre="short_play", sort="hot_score", theme="", setting="", background="", cursor=""):
+        self._genre(genre)
+        if sort not in SORTS or any(not isinstance(value, str) or len(value) > 80 for value in (theme, setting, background, cursor)):
+            raise ProviderError("INPUT_INVALID", "筛选条件不正确", 400)
+        filters = self.filters(genre)["filters"]
+        selected = {"category_dim_theme": theme, "category_dim_role": setting, "category_dim_epoch": background}
+        for kind, value in selected.items():
+            if value and not any(group["type"] == kind and any(item["id"] == value for item in group["items"]) for group in filters["groups"]):
+                raise ProviderError("INPUT_INVALID", "这项分类已更新，请重新选择题材", 400)
+        scope = (genre, sort, theme, setting, background)
+
+        def read():
+            offset, shown = 0, []
+            if cursor:
+                continuation = self.cache.get(("browse-cursor", cursor), 900, lambda: None)
+                if not continuation or continuation["scope"] != scope:
+                    raise ProviderError("CURSOR_EXPIRED", "片单已更新，请刷新后继续浏览", 400)
+                offset, shown = continuation["offset"], continuation["shown"]
+            page_reader = getattr(self.sdk, "browse_page", None)
+            if page_reader:
+                data = self._read("读取片单", lambda: page_reader(genre, sort=sort, theme=theme or None,
+                    setting=setting or None, background=background or None, offset=offset, shown=shown))
+                items, has_more = self._list(data.get("items") or []), bool(data.get("hasMore"))
+            else:
+                items = self._read("读取片单", lambda: self._list(self.sdk.browse(genre, sort=sort,
+                    theme=theme or None, setting=setting or None, background=background or None, max_items=50)))
+                data, has_more = {}, False
+            next_cursor = ""
+            if has_more and items:
+                next_cursor = secrets.token_hex(12)
+                self.cache.get(("browse-cursor", next_cursor), 900, lambda: {"scope": scope,
+                    "offset": data["offset"], "shown": data["shown"]})
+            return {"items": items, "filters": filters, "hasMore": has_more and bool(items), "cursor": next_cursor}
+
+        return self.cache.get(("browse", *scope, cursor), 120, read)
 
     def detail(self, series_id):
         sid = identifier(series_id)
@@ -775,6 +814,51 @@ class Provider:
             return self._list(response.get("items"))
         return {"items": self.cache.get(("favorites", session["uid"]), 15, lambda: self._read("读取收藏", read))}
 
+    def _remote_playback_progress(self, sid, session):
+        """Read fresh resume data for one series; this POST is a read-only RPC."""
+        response = self.account._json(self.account._call(
+            "POST", "/reading/bookapi/read_progress/get/v", body={"book_ids": {"2": [int(sid)]}}, session=session))
+        if not isinstance(response, dict) or response.get("code") not in (0, "0"):
+            raise ProviderError("CLOUD_READ_FAILED", "暂时读不到云端续播进度，已保留待同步记录")
+        rows = response.get("video_data")
+        if not isinstance(rows, list):
+            raise ProviderError("CLOUD_READ_FAILED", "云端续播进度格式暂时不可用，已保留待同步记录")
+        matches = []
+        for row in rows:
+            if not isinstance(row, dict) or str(row.get("series_id") or "") != sid:
+                continue
+            stamp, position, episode = row.get("last_watch_time"), row.get("current_play_time"), row.get("vid_index")
+            if (any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+                    or value < 0 for value in (stamp, position, episode))
+                    or not 1 <= episode <= 100000 or int(episode) != episode or position > 86400000
+                    or not re.fullmatch(r"[0-9]{8,24}", str(row.get("vid") or ""))):
+                raise ProviderError("CLOUD_READ_FAILED", "云端续播进度格式暂时不可用，已保留待同步记录")
+            matches.append({"episode": int(episode), "vid": str(row["vid"]), "position": position,
+                            "updatedAt": stamp})
+        if rows and not matches:
+            raise ProviderError("CLOUD_READ_FAILED", "云端未返回目标剧的续播进度，已保留待同步记录")
+        return max(matches, key=lambda row: row["updatedAt"], default={"episode": 0, "vid": "", "position": 0, "updatedAt": 0})
+
+    @staticmethod
+    def _replay_superseded(cloud, item, stamp_ms):
+        # Millisecond rounding of the same partially completed action must not
+        # prevent repairing its second store. Episode size is not recency.
+        delta = stamp_ms - item["read_timestamp_ms"]
+        if delta > 1:
+            return True
+        if delta < -1:
+            return False
+        episode = number(cloud.get("episode"))
+        if episode and episode != item["vid_index"]:
+            return True
+        vid = cloud.get("vid")
+        if vid and str(vid) != str(item["vid"]):
+            return True
+        position = cloud.get("position") or 0
+        if isinstance(position, bool) or not isinstance(position, (int, float)) or not math.isfinite(position) or position < 0:
+            raise ProviderError("CLOUD_READ_FAILED", "云端进度格式暂时不可用，已保留待同步记录")
+        return episode == item["vid_index"] and position > item["current_play_position"] + 1
+
     def progress(self, payload):
         """Only a direct playback action may write cloud progress. No guard or bulk push."""
         if not isinstance(payload, dict) or not isinstance(payload.get("series"), dict):
@@ -808,6 +892,12 @@ class Provider:
                 raise ProviderError("SYNC_COOLDOWN", "云端同步正在冷却，请稍后重试", 429)
             if self.account._account_changed(session):
                 raise ProviderError("ACCOUNT_CHANGED", "账号已切换，已取消旧账号的同步", 409)
+            detail = self.detail(sid)
+            target = next((row for row in detail["episodes"] if row["index"] == episode), None)
+            if not target:
+                raise ProviderError("EPISODE_NOT_FOUND", "这集不存在", 404)
+            item = build_progress_item(series, episode, target["vid"], position, duration, watched_at,
+                                       detail["series"].get("totalEpisodes") or len(detail["episodes"]))
             if intent == "replay":
                 if not payload.get("watchedAt"):
                     raise ProviderError("INPUT_INVALID", "旧进度缺少观看时间，已取消重试", 400)
@@ -815,28 +905,45 @@ class Provider:
                 self.cache.get(("replay-cloud", expected["uid"]), 5,
                                lambda: self._read("核对云端进度", lambda: self.account._history_all_cached(force=True)))
                 cloud = self._read("核对云端进度", lambda: self.account.remote_progress(sid))
-                if not cloud.get("ok"):
+                if not isinstance(cloud, dict) or not cloud.get("ok"):
                     raise ProviderError("CLOUD_READ_FAILED", "暂时读不到云端进度，已跳过旧进度重试")
-                if (epoch_seconds(cloud.get("updatedAt") or 0) > watched_at or number(cloud.get("episode")) > episode
-                        or (number(cloud.get("episode")) == episode and mobile_position_seconds(cloud.get("position") or 0) > position)):
+                self._expect_uid(expected["uid"])
+                if self.account._account_changed(session):
+                    raise ProviderError("ACCOUNT_CHANGED", "账号已切换，已取消旧账号的同步", 409)
+                try:
+                    cloud_stamp_ms = round(epoch_seconds(cloud.get("updatedAt") or 0) * 1000)
+                except ValueError:
+                    raise ProviderError("CLOUD_READ_FAILED", "云端进度时间暂时不可用，已保留待同步记录") from None
+                if self._replay_superseded(cloud, item, cloud_stamp_ms):
                     return {"synced": True, "skipped": True, "reason": "云端进度已更新，已忽略旧进度重试"}
-            detail = self.detail(sid)
-            target = next((row for row in detail["episodes"] if row["index"] == episode), None)
-            if not target:
-                raise ProviderError("EPISODE_NOT_FOUND", "这集不存在", 404)
-            item = build_progress_item(series, episode, target["vid"], position, duration, watched_at,
-                                       detail["series"].get("totalEpisodes") or len(detail["episodes"]))
+                playback = self._read("核对云端续播进度", lambda: self._remote_playback_progress(sid, session))
+                self._expect_uid(expected["uid"])
+                if self.account._account_changed(session):
+                    raise ProviderError("ACCOUNT_CHANGED", "账号已切换，已取消旧账号的同步", 409)
+                if self._replay_superseded(playback, item, playback["updatedAt"]):
+                    return {"synced": True, "skipped": True, "reason": "云端续播进度已更新，已忽略旧进度重试"}
+
+            def write(label, endpoint, body):
+                self._expect_uid(expected["uid"])
+                if self.account._account_changed(session):
+                    raise ProviderError("ACCOUNT_CHANGED", "账号已切换，已取消旧账号的同步", 409)
+                result = self._read(label, lambda: self.account._json(self.account._call(
+                    "POST", endpoint, body=body, session=session)))
+                if not isinstance(result, dict) or result.get("code") not in (0, "0"):
+                    if isinstance(result, dict) and result.get("code") in (100, "100"):
+                        self._cooldown_until = time.monotonic() + 90
+                        raise ProviderError("SYNC_COOLDOWN", "云端同步正在冷却，请稍后重试", 429)
+                    raise ProviderError("SYNC_FAILED", "播放进度尚未完全同步，已保留待同步记录")
+                data = result.get("data")
+                if isinstance(data, dict) and data.get("update_fail_datas"):
+                    raise ProviderError("SYNC_FAILED", "这次播放进度没有保存成功，已保留待同步记录")
+
+            write("同步观看历史", "/reading/bookapi/read_history/update/v", {"update_datas": [item]})
+            write("同步续播进度", "/reading/bookapi/read_progress/upload/v",
+                  {"books": [build_playback_progress_item(item)], "write_mode": 1})
+            self._expect_uid(expected["uid"])
             if self.account._account_changed(session):
                 raise ProviderError("ACCOUNT_CHANGED", "账号已切换，已取消旧账号的同步", 409)
-            result = self._read("同步播放进度", lambda: self.account._json(self.account._call(
-                "POST", "/reading/bookapi/read_history/update/v", body={"update_datas": [item]}, session=session)))
-            if result.get("code") not in (0, "0"):
-                if result.get("code") in (100, "100"):
-                    self._cooldown_until = time.monotonic() + 90
-                    raise ProviderError("SYNC_COOLDOWN", "云端同步正在冷却，请稍后重试", 429)
-                raise ProviderError("SYNC_FAILED", "播放进度暂时无法同步，请稍后重试")
-            if (result.get("data") or {}).get("update_fail_datas"):
-                raise ProviderError("SYNC_FAILED", "这次播放进度没有保存成功，请稍后重试")
             self._last_progress[(uid, sid)] = ((episode, position), time.monotonic())
             self.cache.clear()
             return {"synced": True, "episode": episode}

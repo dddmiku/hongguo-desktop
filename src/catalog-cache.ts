@@ -1,7 +1,8 @@
 import type { Series } from '../shared/contracts';
 
 export interface CatalogFilterOption { id: string; name: string; }
-export type CatalogFilters = { themes?: string[]; themeOptions?: CatalogFilterOption[] } | Array<{ type: string; items: CatalogFilterOption[] }>;
+export interface CatalogFilterGroup { type: string; name?: string; items: CatalogFilterOption[]; }
+export type CatalogFilters = { themes?: string[]; themeOptions?: CatalogFilterOption[]; groups?: CatalogFilterGroup[] } | CatalogFilterGroup[];
 export interface CatalogResult { items: Series[]; hasMore?: boolean; cursor?: string; filters?: CatalogFilters; cached?: boolean; stale?: boolean; updating?: boolean; updatedAt?: number; warning?: string; }
 interface Entry { at: number; data: CatalogResult; }
 const memory = new Map<string, Entry>();
@@ -16,8 +17,9 @@ function series(value: Series): Series | null {
   return { id: String(value.id), title: text(value.title), cover: /^https?:\/\//.test(value.cover || '') ? text(value.cover, 3000) : '', intro: text(value.intro, 3000), totalEpisodes: Number.isFinite(value.totalEpisodes) ? Math.max(0, value.totalEpisodes) : 0, tags: names(value.tags), actors: names(value.actors), ...(value.score ? { score: text(value.score, 30) } : {}) };
 }
 function clean(data: CatalogResult): CatalogResult {
-  const options = (rows: unknown) => Array.isArray(rows) ? rows.slice(0, 80).filter(row => row && typeof row.id === 'string' && typeof row.name === 'string').map(row => ({ id: row.id.slice(0, 80), name: row.name.slice(0, 80) })) : [];
-  const filters: CatalogFilters | undefined = data.filters ? Array.isArray(data.filters) ? data.filters.slice(0, 20).filter(f => typeof f.type === 'string').map(f => ({ type: f.type.slice(0, 80), items: options(f.items) })) : { themeOptions: options(data.filters.themeOptions), themes: Array.isArray(data.filters.themes) ? data.filters.themes.filter(s => typeof s === 'string').slice(0, 80).map(s => s.slice(0, 80)) : [] } : undefined;
+  const options = (rows: unknown) => Array.isArray(rows) ? rows.slice(0, 160).filter(row => row && typeof row.id === 'string' && typeof row.name === 'string').map(row => ({ id: row.id.slice(0, 80), name: row.name.slice(0, 80) })) : [];
+  const groups = (rows: CatalogFilterGroup[] = []) => rows.slice(0, 20).filter(f => typeof f.type === 'string').map(f => ({ type: f.type.slice(0, 80), name: typeof f.name === 'string' ? f.name.slice(0, 80) : undefined, items: options(f.items) }));
+  const filters: CatalogFilters | undefined = data.filters ? Array.isArray(data.filters) ? groups(data.filters) : { themeOptions: options(data.filters.themeOptions), themes: Array.isArray(data.filters.themes) ? data.filters.themes.filter(s => typeof s === 'string').slice(0, 80).map(s => s.slice(0, 80)) : [], groups: groups(data.filters.groups) } : undefined;
   return { items: (data.items || []).slice(0, 160).map(series).filter((item): item is Series => !!item), hasMore: !!data.hasMore, cursor: typeof data.cursor === 'string' ? data.cursor.slice(0, 1024) : '', filters, updatedAt: data.updatedAt };
 }
 function load() {
@@ -39,7 +41,7 @@ export function readCatalog(key: string): CatalogResult | null {
   return structuredClone({ ...entry.data, cached: true, updatedAt: entry.data.updatedAt || entry.at / 1000 });
 }
 export function writeCatalog(key: string, data: CatalogResult) {
-  load(); if (!Array.isArray(data.items) || !data.items.length) return;
+  load(); if (!Array.isArray(data.items) || !data.items.length && !data.filters) return;
   const safe = clean(data); memory.set(key, { at: Date.now(), data: safe }); prune();
   try { localStorage.setItem(STORAGE, JSON.stringify([...memory.entries()].filter(([key]) => persistable(key)).map(([key, entry]) => ({ key, ...entry })))); } catch { /* Memory cache still serves navigation when disk storage is unavailable. */ }
 }

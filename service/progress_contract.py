@@ -45,3 +45,17 @@ def build_progress_item(series, episode, vid, position_seconds, duration_seconds
             "episode_cnt": max(0, int(total)), "is_delete": False, "use_soft_delete": False,
             "genre_type": 2150, "book_name": str(series.get("title") or "")[:120],
             "thumb_url": str(series.get("cover") or "")[:400]}
+
+
+def build_playback_progress_item(history_item):
+    """Official 7.4.3 VideoProgressUploadHelp's independent resume contract.
+
+    This receives the already validated viewing action so both stores have the
+    same video, position and timestamp. ProgressRateInfo uses strings for IDs
+    and current_play_time in milliseconds, unlike ReadHistoryData's fields.
+    """
+    return {"book_id": history_item["book_id_str"], "book_type": 2,
+            "item_id": str(history_item["vid"]), "vid_index": history_item["vid_index"],
+            "read_timestamp_ms": history_item["read_timestamp_ms"],
+            "current_play_time": history_item["current_play_position"],
+            "player_cumulative_total_duration": history_item["player_accumulate_total_time"]}

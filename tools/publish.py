@@ -1,5 +1,6 @@
 """发布独立客户端与旧版本迁移入口。凭据只在内存和 Git 子进程环境中。"""
 import argparse
+import copy
 import ctypes
 from ctypes import wintypes
 import hashlib
@@ -115,28 +116,121 @@ def upload(repo, release, asset, secret):
     code, result = request("POST", url, secret, raw=raw, content_type="application/octet-stream")
     if code not in (200, 201) or result.get("size") != len(raw):
         raise RuntimeError("上传资产失败：%s HTTP %s" % (asset.name, code))
+    if result.get("digest") and result["digest"] != "sha256:" + hashlib.sha256(raw).hexdigest():
+        raise RuntimeError("上传资产摘要不符：" + asset.name)
     print("已上传：", asset.name, len(raw), "bytes")
+    return result
 
 
-def make_release(repo, assets, notes, secret, version=None, title=None):
-    version = version or VERSION
-    tag = "v" + version
-    code, existing = request("GET", "https://api.github.com/repos/%s/releases/tags/%s" % (repo, tag), secret)
+def _draft_release(repo, release_id, tag, secret):
+    """Read the current state before touching assets; never turn a public release back into a draft."""
+    code, release = request("GET", "https://api.github.com/repos/%s/releases/%s" % (repo, release_id), secret)
+    if code != 200 or release.get("id") != release_id or release.get("tag_name") != tag:
+        raise RuntimeError("无法核对发布草稿，停止修改资产")
+    if release.get("draft") is not True:
+        raise RuntimeError("该版本已经公开，拒绝覆盖，请递增版本号")
+    return release
+
+
+def _asset_matches(remote, local):
+    # Size alone cannot prove that a previous interrupted upload belongs to this build.
+    return (remote.get("state", "uploaded") == "uploaded"
+            and remote.get("size") == local.stat().st_size
+            and remote.get("digest") == "sha256:" + hashlib.sha256(local.read_bytes()).hexdigest())
+
+
+def _find_release(repo, tag, secret):
+    code, release = request("GET", "https://api.github.com/repos/%s/releases/tags/%s" % (repo, tag), secret)
     if code == 200:
-        raise RuntimeError("该版本已经发布，拒绝覆盖，请递增版本号")
+        return release
     if code != 404:
         raise RuntimeError("发布版本查询失败")
-    code, metadata = request("GET", "https://api.github.com/repos/" + repo, secret)
-    if code != 200:
-        raise RuntimeError("无法查询发布仓库分支")
-    code, release = request("POST", "https://api.github.com/repos/%s/releases" % repo, secret, {
-        "tag_name": tag, "target_commitish": metadata.get("default_branch") or "main",
-        "name": title or "红果桌面 " + version, "body": notes, "draft": True, "prerelease": False})
-    if code != 201:
-        raise RuntimeError("无法创建发布草稿：HTTP %s" % code)
+    # GitHub's tag endpoint returns 404 for drafts, including authenticated owners.
+    # The authenticated release listing includes them and avoids duplicate creation.
+    for page in range(1, 11):
+        code, releases = request("GET", "https://api.github.com/repos/%s/releases?per_page=100&page=%s" % (repo, page), secret)
+        if code != 200 or not isinstance(releases, list):
+            raise RuntimeError("无法核对已有发布草稿")
+        found = [item for item in releases if item.get("tag_name") == tag]
+        if len(found) > 1:
+            raise RuntimeError("同版本存在多个发布，停止修改")
+        if found:
+            return found[0]
+        if len(releases) < 100:
+            return None
+    raise RuntimeError("发布列表过长，无法确定版本是否已存在")
+
+
+def _align_draft_tag(repo, release, tag, source_commit, secret):
+    """An unpublished replacement must expose the same source as its final installer."""
+    base = "https://api.github.com/repos/" + repo
+    code, main = request("GET", base + "/branches/main", secret)
+    if code != 200 or main.get("commit", {}).get("sha") != source_commit:
+        raise RuntimeError("最终源码尚未推送至 main，停止发布")
+    code, ref = request("GET", base + "/git/ref/tags/" + tag, secret)
+    if code == 200:
+        old = ref.get("object", {})
+        if old.get("type") != "commit":
+            raise RuntimeError("已有标签不是轻量提交标签，停止修改")
+        if old.get("sha") != source_commit:
+            _draft_release(repo, release["id"], tag, secret)
+            code, ref = request("PATCH", base + "/git/refs/tags/" + tag, secret,
+                                {"sha": source_commit, "force": True})
+            if code != 200 or ref.get("object", {}).get("sha") != source_commit:
+                raise RuntimeError("草稿标签未能对齐最终源码")
+            print("草稿源码标签已对齐：", old.get("sha", "")[:8], "->", source_commit[:8])
+    elif code != 404:
+        raise RuntimeError("无法核对草稿源码标签")
+    _draft_release(repo, release["id"], tag, secret)
+    return source_commit
+
+
+def make_release(repo, assets, notes, secret, version=None, title=None, source_commit=None):
+    version = version or VERSION
+    tag = "v" + version
+    existing = _find_release(repo, tag, secret)
+    if existing is not None:
+        if existing.get("draft") is not True:
+            raise RuntimeError("该版本已经发布，拒绝覆盖，请递增版本号")
+        release = existing
+        print("继续尚未公开的草稿：", tag)
+    else:
+        code, metadata = request("GET", "https://api.github.com/repos/" + repo, secret)
+        if code != 200:
+            raise RuntimeError("无法查询发布仓库分支")
+        code, release = request("POST", "https://api.github.com/repos/%s/releases" % repo, secret, {
+            "tag_name": tag, "target_commitish": metadata.get("default_branch") or "main",
+            "name": title or "红果桌面 " + version, "body": notes, "draft": True, "prerelease": False})
+        if code != 201:
+            raise RuntimeError("无法创建发布草稿：HTTP %s" % code)
+    if len({asset.name for asset in assets}) != len(assets):
+        raise RuntimeError("发布资产存在重复文件名")
     for asset in assets:
+        if not asset.is_file():
+            raise RuntimeError("发布资产缺失：" + asset.name)
+        release = _draft_release(repo, release["id"], tag, secret)
+        same = [remote for remote in release.get("assets", []) if remote.get("name") == asset.name]
+        if len(same) == 1 and _asset_matches(same[0], asset):
+            print("已复用通过摘要校验的草稿资产：", asset.name)
+            continue
+        for remote in same:
+            _draft_release(repo, release["id"], tag, secret)
+            code, _ = request("DELETE", "https://api.github.com/repos/%s/releases/assets/%s" % (repo, remote["id"]), secret)
+            if code != 204:
+                raise RuntimeError("无法替换草稿资产：" + asset.name)
+        release = _draft_release(repo, release["id"], tag, secret)
         upload(repo, release, asset, secret)
-    code, result = request("PATCH", "https://api.github.com/repos/%s/releases/%s" % (repo, release["id"]), secret, {"draft": False, "make_latest": "true"})
+    release = _draft_release(repo, release["id"], tag, secret)
+    for asset in assets:
+        uploaded = next((remote for remote in release.get("assets", []) if remote.get("name") == asset.name), None)
+        # GitHub returns digest for release assets; no digest means this draft cannot be called verified.
+        if uploaded is None or not _asset_matches(uploaded, asset):
+            raise RuntimeError("草稿资产尚未校验完整，保留草稿供重试：" + asset.name)
+    metadata = {"draft": False, "make_latest": "true", "name": title or "红果桌面 " + version,
+                "body": notes, "prerelease": False}
+    if source_commit:
+        metadata["target_commitish"] = _align_draft_tag(repo, release, tag, source_commit, secret)
+    code, result = request("PATCH", "https://api.github.com/repos/%s/releases/%s" % (repo, release["id"]), secret, metadata)
     if code != 200:
         raise RuntimeError("无法公开发布草稿")
     print("已发布：", result["html_url"])
@@ -169,7 +263,7 @@ def publish(secret, legacy=False):
     previous = legacy_feed(secret)
     digest = hashlib.sha256(installer.read_bytes()).hexdigest()
     notes = (ROOT / "docs/release-notes.md").read_text(encoding="utf-8")
-    platforms = previous.get("platforms", {})
+    platforms = copy.deepcopy(previous.get("platforms") or {})
     platforms["windows-x86_64"] = {"version": VERSION, "sha256": digest, "size": installer.stat().st_size,
         "url": "https://github.com/%s/releases/download/v%s/%s" % (REPO, VERSION, installer.name)}
     feed = {"version": VERSION, "sha256": digest, "notes": notes, "platforms": platforms,
@@ -192,7 +286,10 @@ def publish(secret, legacy=False):
     public_assets = [installer, archive] if publish_runtime else [installer]
     checksums.write_text("\n".join(hashlib.sha256(a.read_bytes()).hexdigest() + "  " + a.name for a in ((bridge_installer,) if legacy else public_assets)), encoding="utf-8")
     if not legacy:
-        make_release(REPO, [*public_assets, latest, checksums], notes, secret)
+        if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT).strip():
+            raise RuntimeError("源码仍有未提交改动，停止发布")
+        source_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        make_release(REPO, [*public_assets, latest, checksums], notes, secret, source_commit=source_commit)
     else:
         migration_notes = "新版客户端已迁移到独立公开源码仓库 [hongguo-desktop](https://github.com/%s)。\n\n" % REPO
         migration_notes += "旧客户端可以直接检查更新并下载安装。首次启动会只读导入旧账号、历史和收藏，旧安装和数据保留。\n\n" + notes

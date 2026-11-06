@@ -40,6 +40,7 @@ class _Job:
     episode: int
     quality: str
     directory: Path
+    duration: float = 0.0
     phase: str = "preparing"
     error: str = ""
     cached: bool = False
@@ -119,6 +120,11 @@ class MediaManager:
                 job = _Job(path.name, metadata["seriesId"], int(metadata["episode"]),
                            metadata["quality"], path, phase="complete", cached=True,
                            accessed=(path / "complete.json").stat().st_mtime)
+                job.duration = float(metadata.get("duration") or 0)
+                if not job.duration:
+                    text = (path / "index.m3u8").read_text(encoding="utf-8")
+                    if "#EXT-X-ENDLIST" in text:
+                        job.duration = sum(float(value) for value in re.findall(r"^#EXTINF:([0-9.]+),", text, re.MULTILINE))
                 job.ready.set()
                 job.done.set()
                 self.jobs[job.key] = job
@@ -192,6 +198,8 @@ class MediaManager:
                "cached": job.cached, "quality": job.quality}
         if job.error and not session.cancelled:
             out["error"] = job.error
+        if job.duration > 0:
+            out["duration"] = job.duration
         return out
 
     def get(self, identifier, base_url=""):
@@ -264,6 +272,8 @@ class MediaManager:
                 raise MediaCancelled()
             if not source.is_file():
                 raise FileNotFoundError("视频源不存在")
+            # 整集源已落盘，读容器头即可知道真实总时长；不等待HLS完整编码。
+            job.duration = self._source_duration(source, job)
             job.directory.mkdir(exist_ok=False)
             (job.directory / "owner").write_text(_OWNER, encoding="ascii")
             with (job.directory / "encode.log").open("wb") as errors:
@@ -289,8 +299,10 @@ class MediaManager:
                 raise RuntimeError("没有生成完整的视频片段")
             manifest.write_text(text.replace("#EXT-X-PLAYLIST-TYPE:EVENT",
                                              "#EXT-X-PLAYLIST-TYPE:VOD"), encoding="utf-8")
+            if not job.duration:
+                job.duration = sum(float(value) for value in re.findall(r"^#EXTINF:([0-9.]+),", text, re.MULTILINE))
             metadata = {"owner": _OWNER, "seriesId": job.series_id,
-                        "episode": job.episode, "quality": job.quality}
+                        "episode": job.episode, "quality": job.quality, "duration": job.duration}
             (job.directory / "complete.json").write_text(json.dumps(metadata), encoding="utf-8")
             self._promote(job)
         except Exception as error:
@@ -314,6 +326,30 @@ class MediaManager:
                     except Exception:
                         pass
             job.ready.set()
+
+    def _source_duration(self, source, job):
+        try:
+            import av
+            with av.open(str(source)) as container:
+                values = [float(container.duration or 0) / av.time_base]
+                values.extend(float(stream.duration * stream.time_base) for stream in container.streams
+                              if stream.duration and stream.time_base)
+                duration = max(values, default=0)
+                if math.isfinite(duration) and 0 < duration <= 86400:
+                    return duration
+        except Exception:
+            pass
+        # 部分容器没有duration；SDK剧集元数据是独立的可信来源。
+        detail = getattr(self.provider, "detail", None)
+        if callable(detail):
+            try:
+                episode = next(item for item in detail(job.series_id)["episodes"] if item["index"] == job.episode)
+                duration = float(episode.get("duration") or 0)
+                if math.isfinite(duration) and 0 < duration <= 86400:
+                    return duration
+            except Exception:
+                pass
+        return 0.0  # 未知时不拿当前片段长度冒充整集时长。
 
     def _promote(self, job):
         """Windows 扫描/读句柄短暂未分享DELETE时，保留完整产物等待其释放。"""

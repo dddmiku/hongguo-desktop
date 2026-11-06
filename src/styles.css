@@ -427,3 +427,6 @@ kbd { font:inherit; }
 .phone-input:focus-within{box-shadow:0 0 0 2px rgba(var(--brand-rgb),.12)}
 @media(max-width:1250px){.header-tools{gap:4px}.app-header .global-search{width:235px}.header-shortcut,.header-account{width:31px}.my-library-button>span{display:none}.my-library-button{width:31px}}
 @media(max-width:1000px){.app-header{gap:7px;padding-left:20px;padding-right:15px}.header-drag-space{min-width:10px}.app-header .global-search{width:215px}.catalog-status{max-width:150px;font-size:10px}.catalog-refresh{gap:7px}}
+.app-topnav{--player-header-height:84px}
+.app-topnav .playback-page:has(.player-theater){width:100%;max-width:none;padding:0;margin:0}
+@media(max-width:1040px){.app-topnav{--player-header-height:75px}}

@@ -8,3 +8,14 @@
 .playback-layout:fullscreen .comments-panel{height:100vh;max-height:none}
 .playback-layout:fullscreen .player-controls{padding:65px max(24px,env(safe-area-inset-right)) max(20px,env(safe-area-inset-bottom)) max(24px,env(safe-area-inset-left))}
 .fullscreen-toolbar{display:none}.playback-layout:fullscreen .fullscreen-toolbar{display:flex;align-items:center;justify-content:space-between;position:absolute;top:0;left:0;right:0;padding:22px 26px 60px;background:linear-gradient(#000b,transparent);z-index:3;transition:opacity .2s;pointer-events:none}.fullscreen-toolbar>div{display:flex;gap:14px;align-items:center;min-width:0}.fullscreen-toolbar strong{font-size:15px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fullscreen-toolbar span{font-size:12px;color:#bbb;white-space:nowrap}.fullscreen-toolbar button{pointer-events:auto;color:#fff}.video-stage.controls-hidden .fullscreen-toolbar{opacity:0;pointer-events:none}.video-stage.controls-hidden .fullscreen-toolbar button{pointer-events:none}
+.player-theater{max-width:none;margin:0;padding:0 0 35px;animation:none}
+.player-theater .player-heading{height:72px;min-height:72px;margin:0;padding:12px 32px;gap:18px;background:var(--bg)}
+.player-theater .player-heading h2{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.player-theater .playback-layout:not(:fullscreen){width:100%;height:calc(100dvh - var(--player-header-height,84px) - 72px);min-height:320px;max-height:none;border:0;border-radius:0;box-shadow:none;background:#000}
+.player-theater .playback-layout:not(:fullscreen) .video-stage{height:100%;min-height:0;max-height:none;width:100%;aspect-ratio:auto;background:#000}
+.player-theater .playback-layout:not(:fullscreen) .comments-panel{height:100%;max-height:none}
+.player-theater .episode-heading,.player-theater>.episode-grid,.player-theater>.player-description,.player-theater>.player-notice{margin-left:32px;margin-right:32px}
+.player-theater .episode-heading{margin-top:25px}
+.player-theater>.episode-grid{max-height:200px}
+.player-theater .playback-layout:not(:fullscreen) .player-controls{padding-left:30px;padding-right:30px}
+@media(max-width:1040px){.player-theater .player-heading{padding-left:23px;padding-right:23px}.player-theater .episode-heading,.player-theater>.episode-grid,.player-theater>.player-description{margin-left:23px;margin-right:23px}}

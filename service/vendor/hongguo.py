@@ -740,6 +740,35 @@ def browse(genre='short_play', theme=None, setting=None, background=None, sort='
         offset += len(items)
     return out
 
+def browse_page(genre='short_play', theme=None, setting=None, background=None,
+                sort='hot_score', offset=0, shown=None):
+    """One real category page with the vendor's offset and exclusion list."""
+    if genre not in GENRES:
+        raise ValueError('Unknown genre')
+    scene, g = GENRES[genre]
+    selected = {'genre': [g], 'category_dim_theme': _ids(theme, FILTER_CATE),
+                'category_dim_role': _ids(setting, FILTER_CATE),
+                'category_dim_epoch': _ids(background, FILTER_CATE),
+                'sort': [sort], 'gender': [], 'creation_status': [], 'online_time': []}
+    seen = list(shown or [])
+    body = {'filter_ids': ','.join(seen), 'req_scene': scene, 'offset': offset,
+            'need_selector_panel': False, 'limit': 18, 'select_items': selected,
+            'session_id': '', 'req_type': 'only_content', 'client_req_type': 3}
+    data = api('POST', '/reading/distribution/category/landpage/v', body=body,
+               signed=SIGN_LIST).get('data', {})
+    videos = data.get('video_data') or []
+    items = []
+    for video in videos:
+        categories = list(dict.fromkeys(re.findall(r'"name"\s*:\s*"([^"]+)"',
+                                                    video.get('category_schema') or '')))
+        items.append({'series_id': str(video.get('series_id') or ''),
+                      'title': video.get('title') or '', 'episode_cnt': video.get('episode_cnt') or 0,
+                      'score': video.get('score') or '', 'cover': video.get('cover') or '',
+                      'category': categories, 'intro': (video.get('video_desc') or '')[:2000]})
+    return {'items': items, 'offset': offset + len(videos),
+            'shown': list(dict.fromkeys(seen + [row['series_id'] for row in items]))[-500:],
+            'hasMore': bool(videos) and bool(data.get('has_more', True))}
+
 class _HQEmptyResponse:
     status_code = 200
     content = b''

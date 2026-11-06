@@ -154,6 +154,21 @@ class MediaTests(unittest.TestCase):
         wait_for(lambda: manager.pending == 0)
         self.assertEqual(manager.get(retry["id"])["phase"], "complete")
 
+    def test_complete_episode_duration_is_exposed_before_encoding_finishes(self):
+        provider = Provider(self.source)
+        provider.detail = lambda sid: {"episodes": [{"index": 1, "duration": 179}]}
+        manager = self.manager(provider)
+        self.encoder.write_text(self.encoder.read_text(encoding="utf-8").replace("time.sleep(.04)", "time.sleep(60)"), encoding="utf-8")
+        session = manager.create("12345678", 1)
+        job = manager.sessions[session["id"]].job
+        wait_for(lambda: manager.get(session["id"])["phase"] == "ready")
+        state = manager.get(session["id"])
+        self.assertEqual(state["duration"], 179)
+        self.assertFalse(job.done.is_set())
+        self.assertIn(b"#EXTINF:2,", manager.read_file(session["id"], "index.m3u8"))
+        manager.cancel(session["id"])
+        self.assertTrue(job.done.wait(2))
+
     def test_windows_directory_sharing_handle_retries_only_promotion(self):
         manager = self.manager()
         blocked, errors, attempts = {}, [], []

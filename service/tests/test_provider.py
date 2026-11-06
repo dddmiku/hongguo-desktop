@@ -40,7 +40,7 @@ class ProviderTests(unittest.TestCase):
             remote_progress=Mock(return_value={"ok": True, "episode": 0, "updatedAt": 0, "reason": "absent"}),
             _session_identity=Mock(return_value="synthetic-identity"), _account_changed=Mock(return_value=False),
             remote_history_page=Mock(return_value={"ok": True, "items": [], "total": 0, "nextOffset": 0, "hasMore": False}),
-            _call=Mock(return_value={"code": 0, "data": {}}), _json=lambda response: response)
+            _call=Mock(return_value={"code": 0, "data": {}, "video_data": []}), _json=lambda response: response)
         self.mfa_context = {}
         def save_mfa(value):
             self.mfa_context = {**value, "at": value.get("at") or time.time()}
@@ -193,10 +193,19 @@ class ProviderTests(unittest.TestCase):
         progress = {"series": {"id": "12345678", "title": "测试"}, "episode": 2, "position": 10, "duration": 60, "intent": "active", "expectedUid": "synthetic-user"}
         self.assertTrue(self.provider.progress(progress)["synced"])
         self.assertTrue(self.provider.progress(progress)["skipped"])
-        self.assertEqual(self.account._call.call_count, 1)
-        body = self.account._call.call_args.kwargs["body"]["update_datas"][0]
+        self.assertEqual(self.account._call.call_count, 2)
+        history_call, playback_call = self.account._call.call_args_list
+        self.assertEqual(history_call.args[1], "/reading/bookapi/read_history/update/v")
+        self.assertEqual(playback_call.args[1], "/reading/bookapi/read_progress/upload/v")
+        body = history_call.kwargs["body"]["update_datas"][0]
         self.assertEqual(body["vid_index"], 2)
         self.assertEqual(body["current_play_position"], 10000)
+        playback = playback_call.kwargs["body"]
+        self.assertEqual(playback["write_mode"], 1)
+        self.assertEqual(playback["books"][0], {"book_id": "12345678", "book_type": 2, "item_id": "23456790",
+                         "vid_index": 2, "read_timestamp_ms": body["read_timestamp_ms"], "current_play_time": 10000,
+                         "player_cumulative_total_duration": 10000})
+        self.assertEqual(history_call.kwargs["session"], playback_call.kwargs["session"])
 
     def test_account_change_cancels_progress_before_write(self):
         self.account._account_changed.return_value = True
@@ -285,14 +294,15 @@ class ProviderTests(unittest.TestCase):
         self.account._call.assert_not_called()
         self.account.remote_progress.return_value = {"ok": True, "episode": 1, "updatedAt": 1789999999250, "position": 0}
         self.assertTrue(self.provider.progress(payload)["synced"])
-        item = self.account._call.call_args.kwargs["body"]["update_datas"][0]
+        item = next(call.kwargs["body"]["update_datas"][0] for call in self.account._call.call_args_list
+                    if call.args[1] == "/reading/bookapi/read_history/update/v")
         self.assertEqual(item["read_timestamp_ms"], 1790000000250)
 
     def test_live_fractional_position_is_sent_in_milliseconds_through_provider(self):
         payload = {"series": {"id": "12345678", "title": "测试"}, "episode": 2, "position": 27.25,
                    "duration": 60.5, "watchedAt": 1790000000.25, "intent": "active", "expectedUid": "synthetic-user"}
         self.assertTrue(self.provider.progress(payload)["synced"])
-        item = self.account._call.call_args.kwargs["body"]["update_datas"][0]
+        item = self.account._call.call_args_list[0].kwargs["body"]["update_datas"][0]
         self.assertEqual(item["current_play_position"], 27250)
         self.assertEqual(item["duration"], 60500)
         self.assertEqual(item["read_timestamp_ms"], 1790000000250)
@@ -311,7 +321,8 @@ class ProviderTests(unittest.TestCase):
         # Earlier timestamp and position permit the preserved desktop retry.
         self.account.remote_progress.return_value = {"ok": True, "episode": 1, "updatedAt": 1789999999250, "position": 20000}
         self.assertTrue(self.provider.progress(payload)["synced"])
-        item = self.account._call.call_args.kwargs["body"]["update_datas"][0]
+        item = next(call.kwargs["body"]["update_datas"][0] for call in self.account._call.call_args_list
+                    if call.args[1] == "/reading/bookapi/read_history/update/v")
         self.assertEqual(item["current_play_position"], 27250)
 
     def test_replay_cloud_read_failure_never_writes(self):
@@ -321,6 +332,153 @@ class ProviderTests(unittest.TestCase):
                                     "watchedAt": 100000, "expectedUid": "synthetic-user"})
         self.assertEqual(error.exception.code, "CLOUD_READ_FAILED")
         self.account._call.assert_not_called()
+
+    def test_failed_history_write_never_uploads_resume_or_acknowledges(self):
+        self.account._call.return_value = {"code": 1}
+        with self.assertRaises(ProviderError) as error:
+            self.provider.progress({"series": {"id": "12345678"}, "episode": 2,
+                                    "position": 10, "expectedUid": "synthetic-user"})
+        self.assertEqual(error.exception.code, "SYNC_FAILED")
+        self.assertEqual(self.account._call.call_count, 1)
+        self.assertEqual(self.provider._last_progress, {})
+
+    def test_partial_dual_write_replay_repairs_resume_with_original_action(self):
+        watched_at = 1790000000.25
+        payload = {"series": {"id": "12345678"}, "episode": 2, "position": 27.25, "duration": 60.5,
+                   "watchedAt": watched_at, "intent": "active", "expectedUid": "synthetic-user"}
+        uploads = []
+
+        def upstream(method, path, **kwargs):
+            if path.endswith("read_history/update/v"):
+                item = kwargs["body"]["update_datas"][0]
+                # A server rounds the same action up by one millisecond.
+                self.account.remote_progress.return_value = {"ok": True, "episode": 2, "position": 27250,
+                                                             "updatedAt": item["read_timestamp_ms"] + 1}
+                return {"code": 0, "data": {}}
+            if path.endswith("read_progress/get/v"):
+                return {"code": 0, "video_data": [{"series_id": "12345678", "vid": "23456789", "vid_index": 1,
+                        "last_watch_time": 1789999999250, "current_play_time": 5000}]}
+            if path.endswith("read_progress/upload/v"):
+                uploads.append(kwargs["body"])
+                return {"code": 1 if len(uploads) == 1 else 0}
+            raise AssertionError(path)
+
+        self.account._call.side_effect = upstream
+        with self.assertRaises(ProviderError) as error:
+            self.provider.progress(payload)
+        self.assertEqual(error.exception.code, "SYNC_FAILED")
+        self.assertEqual(self.provider._last_progress, {})
+        self.assertTrue(self.provider.progress({**payload, "intent": "replay"})["synced"])
+        self.assertEqual(len(uploads), 2)
+        self.assertEqual(uploads[0], uploads[1])
+        self.assertEqual(uploads[1]["books"][0]["read_timestamp_ms"], 1790000000250)
+        self.assertEqual([call.args[1] for call in self.account._call.call_args_list], [
+            "/reading/bookapi/read_history/update/v", "/reading/bookapi/read_progress/upload/v",
+            "/reading/bookapi/read_progress/get/v", "/reading/bookapi/read_history/update/v",
+            "/reading/bookapi/read_progress/upload/v"])
+
+    def test_account_change_between_writes_cancels_resume_and_ack(self):
+        def history_write(*args, **kwargs):
+            self.account._account_changed.return_value = True
+            return {"code": 0, "data": {}}
+        self.account._call.side_effect = history_write
+        with self.assertRaises(ProviderError) as error:
+            self.provider.progress({"series": {"id": "12345678"}, "episode": 2, "position": 10,
+                                    "expectedUid": "synthetic-user"})
+        self.assertEqual(error.exception.code, "ACCOUNT_CHANGED")
+        self.assertEqual(self.account._call.call_count, 1)
+        self.assertEqual(self.provider._last_progress, {})
+
+    def test_uid_is_revalidated_before_second_progress_write(self):
+        def history_write(*args, **kwargs):
+            self.account.public_session.return_value = {"loggedIn": True, "uid": "another-user"}
+            return {"code": 0, "data": {}}
+        self.account._call.side_effect = history_write
+        with self.assertRaises(ProviderError) as error:
+            self.provider.progress({"series": {"id": "12345678"}, "episode": 2, "position": 10,
+                                    "expectedUid": "synthetic-user"})
+        self.assertEqual(error.exception.code, "ACCOUNT_CHANGED")
+        self.assertEqual(self.account._call.call_count, 1)
+        self.assertEqual(self.provider._last_progress, {})
+
+    def test_account_change_after_resume_write_does_not_acknowledge_stale_session(self):
+        def write(*args, **kwargs):
+            if args[1].endswith("read_progress/upload/v"):
+                self.account._account_changed.return_value = True
+            return {"code": 0, "data": {}}
+        self.account._call.side_effect = write
+        with self.assertRaises(ProviderError) as error:
+            self.provider.progress({"series": {"id": "12345678"}, "episode": 2, "position": 10,
+                                    "expectedUid": "synthetic-user"})
+        self.assertEqual(error.exception.code, "ACCOUNT_CHANGED")
+        self.assertEqual(self.account._call.call_count, 2)
+        self.assertEqual(self.provider._last_progress, {})
+
+    def test_resume_write_throttle_preserves_retry_without_duplicate_coalescing(self):
+        self.account._call.side_effect = [{"code": 0, "data": {}}, {"code": 100}]
+        payload = {"series": {"id": "12345678"}, "episode": 2, "position": 10, "expectedUid": "synthetic-user"}
+        for _ in range(2):
+            with self.assertRaises(ProviderError) as error:
+                self.provider.progress(payload)
+            self.assertEqual(error.exception.code, "SYNC_COOLDOWN")
+        self.assertEqual(self.account._call.call_count, 2)
+        self.assertEqual(self.provider._last_progress, {})
+
+    def test_newer_independent_resume_prevents_replay_even_when_history_is_older(self):
+        self.account.remote_progress.return_value = {"ok": True, "episode": 1, "position": 1000,
+                                                     "updatedAt": 1789999999250}
+        self.account._call.return_value = {"code": 0, "video_data": [
+            {"series_id": "12345678", "vid": "23456789", "vid_index": 1,
+             "last_watch_time": 1790000001250, "current_play_time": 1000}]}
+        result = self.provider.progress({"series": {"id": "12345678"}, "episode": 2, "position": 27.25,
+                        "watchedAt": 1790000000.25, "intent": "replay", "expectedUid": "synthetic-user"})
+        self.assertTrue(result["skipped"])
+        self.account._call.assert_called_once_with("POST", "/reading/bookapi/read_progress/get/v",
+            body={"book_ids": {"2": [12345678]}}, session={"uid": "synthetic-user", "token": "synthetic-only"})
+
+    def test_replay_same_resume_time_with_changed_video_or_further_position_is_preserved(self):
+        payload = {"series": {"id": "12345678"}, "episode": 2, "position": 27.25,
+                   "watchedAt": 1790000000.25, "intent": "replay", "expectedUid": "synthetic-user"}
+        for vid, position in (("34567890", 1000), ("23456790", 30000)):
+            self.account._call.return_value = {"code": 0, "video_data": [{"series_id": "12345678",
+                "vid": vid, "vid_index": 2, "last_watch_time": 1790000000250, "current_play_time": position}]}
+            self.assertTrue(self.provider.progress(payload)["skipped"])
+        self.assertEqual(self.account._call.call_count, 2)
+        self.assertTrue(all(call.args[1].endswith("read_progress/get/v") for call in self.account._call.call_args_list))
+
+    def test_replay_uses_viewing_time_instead_of_larger_old_episode(self):
+        self.account.remote_progress.return_value = {"ok": True, "episode": 2, "position": 59000,
+                                                     "updatedAt": 1789999999250}
+        self.account._call.side_effect = [{"code": 0, "video_data": [{"series_id": "12345678", "vid": "23456790",
+            "vid_index": 2, "last_watch_time": 1789999999250, "current_play_time": 59000}]}, {"code": 0}, {"code": 0}]
+        result = self.provider.progress({"series": {"id": "12345678"}, "episode": 1, "position": 5,
+                        "watchedAt": 1790000000.25, "intent": "replay", "expectedUid": "synthetic-user"})
+        self.assertTrue(result["synced"])
+        self.assertFalse(result.get("skipped", False))
+        self.assertEqual(self.account._call.call_args_list[-1].kwargs["body"]["books"][0]["vid_index"], 1)
+
+    def test_replay_untrusted_or_failed_resume_read_never_uploads(self):
+        for response in ({"code": 1}, {"code": 0, "data": {"video_data": []}},
+                         {"code": 0, "video_data": [{"series_id": "34567890", "vid": "23456789",
+                           "vid_index": 1, "last_watch_time": 1790000000250, "current_play_time": 1000}]},
+                         {"code": 0, "video_data": [{"series_id": "12345678", "vid": "23456789",
+                           "vid_index": 0, "last_watch_time": 1790000000250, "current_play_time": 1000}]}):
+            self.account._call.return_value = response
+            with self.assertRaises(ProviderError) as error:
+                self.provider.progress({"series": {"id": "12345678"}, "episode": 2,
+                            "watchedAt": 1790000000.25, "intent": "replay", "expectedUid": "synthetic-user"})
+            self.assertEqual(error.exception.code, "CLOUD_READ_FAILED")
+        self.assertEqual(self.provider._last_progress, {})
+        self.assertTrue(all(call.args[1].endswith("read_progress/get/v") for call in self.account._call.call_args_list))
+
+    def test_replay_reads_resume_fresh_after_previous_read_failed(self):
+        payload = {"series": {"id": "12345678"}, "episode": 2, "position": 10,
+                   "watchedAt": 1790000000.25, "intent": "replay", "expectedUid": "synthetic-user"}
+        self.account._call.side_effect = [{"code": 1}, {"code": 0, "video_data": []}, {"code": 0}, {"code": 0}]
+        with self.assertRaises(ProviderError):
+            self.provider.progress(payload)
+        self.assertTrue(self.provider.progress(payload)["synced"])
+        self.assertEqual(sum(call.args[1].endswith("read_progress/get/v") for call in self.account._call.call_args_list), 2)
 
     def test_migration_whitelists_session_without_cloud_calls(self):
         self.account.load_session.return_value = {}

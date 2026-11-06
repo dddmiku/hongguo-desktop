@@ -111,8 +111,13 @@ def create_app(provider, token, media_manager=None, signer_ok=lambda: True):
 
     @app.get("/catalog/browse")
     def browse(genre: str = Query("short_play", max_length=32), sort: str = Query("hot_score", max_length=32),
-               theme: str = Query("", max_length=80)):
-        return provider.browse(genre, sort, theme)
+               theme: str = Query("", max_length=80), setting: str = Query("", max_length=80),
+               background: str = Query("", max_length=80), cursor: str = Query("", max_length=80)):
+        return provider.browse(genre, sort, theme, setting, background, cursor)
+
+    @app.get("/catalog/filters")
+    def filters(genre: str = Query("short_play", max_length=32)):
+        return provider.filters(genre)
 
     @app.get("/catalog/series/{series_id}")
     def detail(series_id: str):
