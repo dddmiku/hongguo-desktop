@@ -71,6 +71,11 @@ class GitHub:
 
 class PublishTests(unittest.TestCase):
     def setUp(self):
+        # These are offline API assertions; fake publication messages are noise
+        # and must not depend on the Windows runner's console code page.
+        printer = patch.object(P, "print", create=True)
+        printer.start()
+        self.addCleanup(printer.stop)
         work = ROOT / "_work"
         work.mkdir(exist_ok=True)
         self.directory = tempfile.TemporaryDirectory(prefix="publisher-test-", dir=work)

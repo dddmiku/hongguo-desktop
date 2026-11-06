@@ -14,29 +14,6 @@ const check = (name, ok, detail) => {
   checks.push({ name, ok, detail }); console.log(JSON.stringify(checks.at(-1)));
   if (!ok) throw new Error(name);
 };
-await instance.evaluate(() => {
-  globalThis.__installedCatalog = [];
-  const original = globalThis.fetch;
-  globalThis.fetch = async (...args) => {
-    const url = new URL(String(args[0]));
-    const response = await original(...args);
-    if (url.pathname === '/catalog/browse') {
-      const data = await response.clone().json();
-      globalThis.__installedCatalog.push({ route: url.pathname + url.search, status: response.status,
-        items: (data.items || []).map(item => ({ id: item.id, title: item.title, tags: item.tags })) });
-    }
-    return response;
-  };
-});
-async function lastCategory(theme, after) {
-  const deadline = Date.now() + 90000;
-  while (Date.now() < deadline) {
-    const found = await instance.evaluate(({ theme, after }) => globalThis.__installedCatalog.slice(after).find(row => new URL(row.route, 'http://local').searchParams.get('theme') === theme), { theme, after });
-    if (found) return found;
-    await page.waitForTimeout(100);
-  }
-  throw new Error('Installed category request timed out');
-}
 try {
   await page.waitForSelector('.app-shell', { timeout: 30000 });
   const state = await page.evaluate(async () => ({ health: await window.hongguo.request('/health'), session: await window.hongguo.request('/account/session') }));
@@ -45,17 +22,21 @@ try {
   const filters = await page.evaluate(() => window.hongguo.request('/catalog/filters?genre=short_play'));
   const options = filters.filters.groups.find(group => group.type === 'category_dim_theme').items;
   await page.waitForSelector('.category-theme button', { timeout: 90000 });
+  const reset = page.getByRole('button', { name: '重置筛选', exact: true });
+  if (await reset.count()) { await reset.click(); await page.waitForFunction(() => !document.querySelector('.category-selection')); }
   for (const name of ['动作', '爱情', '年代', '传奇']) {
     const option = options.find(item => item.name === name);
-    const before = await instance.evaluate(() => globalThis.__installedCatalog.length);
     await page.getByRole('group', { name: '题材', exact: true }).getByRole('button', { name, exact: true }).click();
-    const reply = await lastCategory(option.id, before);
+    // Installed and development processes do not share a global fetch context.
+    // Query the real IPC endpoint, then require the UI to show those exact titles.
+    const route = `/catalog/browse?genre=short_play&sort=hot_score&theme=${encodeURIComponent(option.id)}&setting=&background=`;
+    const reply = await page.evaluate(route => window.hongguo.request(route), route);
     await page.waitForFunction(titles => {
       const current = [...document.querySelectorAll('.catalog-page .series-title')].map(node => node.textContent);
-      return !document.querySelector('.catalog-page .refresh-button')?.disabled && titles.every(title => current.includes(title));
+      return !document.querySelector('.catalog-page .refresh-button')?.disabled && titles.length === current.length && titles.every((title, index) => current[index] === title);
     }, reply.items.map(item => item.title));
-    check(`安装版${name}入口与真实结果`, reply.status === 200 && reply.items.length > 0 && reply.items.every(item => item.tags.includes(name)),
-      { route: reply.route, count: reply.items.length, matching: reply.items.filter(item => item.tags.includes(name)).length });
+    check(`安装版${name}入口与真实结果`, reply.items.length > 0 && reply.items.every(item => item.tags.includes(name)),
+      { route, requestSucceeded: true, count: reply.items.length, matching: reply.items.filter(item => item.tags.includes(name)).length });
   }
   await page.screenshot({ path: path.join(out, 'installed-categories.png') });
 
