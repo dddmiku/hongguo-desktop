@@ -1,0 +1,70 @@
+name: Windows checks and optional installer
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      build_installer:
+        description: Build a Windows installer using the published runtime
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: service/requirements.txt
+      - name: Install Node dependencies
+        run: npm ci
+      - name: Check TypeScript
+        run: npm run typecheck
+      - name: Run renderer and main-process tests
+        run: npm test
+      - name: Install Python test dependencies
+        run: python -m pip install -r service/requirements.txt httpx
+      - name: Run isolated service tests
+        run: python -m unittest discover -s service/tests -v
+
+  installer:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_installer
+    needs: checks
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Node dependencies
+        run: npm ci
+      - name: Download and validate release runtime
+        run: python tools/bootstrap-runtime.py
+      - name: Verify expanded runtime files
+        run: python tools/bootstrap-runtime.py --check
+      - name: Build Windows installer
+        run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hongguo-windows-x64-installer
+          path: release/hongguo-*-setup.exe
+          if-no-files-found: error
+          retention-days: 14

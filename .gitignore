@@ -1,0 +1,12 @@
+node_modules/
+dist/
+out/
+release/
+runtime/
+_work/
+test-results/
+playwright-report/
+__pycache__/
+*.pyc
+*.log
+service/tests/.work/
