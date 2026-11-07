@@ -48,7 +48,7 @@ try {
   });
   const query = '人前小保姆';
   await page.getByLabel('搜索剧名、演员或关键词').fill(query); await page.getByLabel('搜索剧名、演员或关键词').press('Enter');
-  const card = page.locator('.series-card').filter({ hasText: query }).first(); await card.waitFor({ timeout: 90000 });
+  const card = page.locator('.series-card[data-series-id="7699859403758914622"]').first(); await card.waitFor({ timeout: 90000 });
   await card.locator('.series-poster-button').click(); await page.waitForSelector('.detail-hero', { timeout: 90000 });
   const details = await page.evaluate(() => window.hongguo.request('/catalog/series/7699859403758914622'));
   const source = await page.evaluate(({ seriesId, duration }) => window.hongguo.request(`/catalog/danmaku?seriesId=${seriesId}&episode=1&duration=${duration}`), { seriesId: details.series.id, duration: details.episodes[0].duration });
@@ -68,7 +68,7 @@ try {
   const stopped = await pixels(); await page.waitForTimeout(800); const frozen = await pixels();
   check('暂停时弹幕画面完全冻结', stopped.occupied > 20 && stopped.hash === frozen.hash, { before: stopped, after: frozen, draws: await page.evaluate(() => window.__danmakuDraw.slice(-6)) });
   await page.keyboard.press('k'); await page.waitForTimeout(800); const moved = await pixels();
-  check('恢复播放后继续移动', moved.occupied > 20 && moved.hash !== frozen.hash);
+  check('恢复播放后继续移动', moved.occupied > 20 && moved.hash !== frozen.hash,{media:await media(),frozen,moved,window:await page.evaluate(()=>({hidden:document.hidden,visibility:document.visibilityState,stage:document.querySelector('.danmaku-canvas').getBoundingClientRect().toJSON()}))});
   await page.keyboard.press('d'); await page.waitForFunction(() => document.querySelector('.danmaku-canvas')?.dataset.activeCount === '0');
   check('D关闭弹幕不停止视频', (await pixels()).occupied === 0 && !(await media()).paused);
   await page.keyboard.press('d'); await page.locator('.video-stage').hover({ position: { x: 30, y: 30 } });

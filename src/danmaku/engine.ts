@@ -44,7 +44,8 @@ export class DanmakuEngine {
     const elapsed = this.previousNow === undefined ? 0 : Math.max(0, (now - this.previousNow) / 1000);
     const jumped = this.previousTime !== undefined && (time < this.previousTime - .25 || time - this.previousTime > Math.max(1, elapsed * Math.max(1, rate) + .75));
     if (seeking || jumped || running && !this.previousRunning && this.lastDisplayedTime !== undefined && Math.abs(time - this.lastDisplayedTime) > .75) this.seek(time);
-    if (running && !seeking) this.clock += Math.min(.25, elapsed);
+    if (running && !seeking) this.clock += this.previousRunning ? Math.min(.25, elapsed)
+      : Math.min(.25, elapsed, Math.max(0,time-(this.previousTime??time))/Math.max(.1,rate));
     this.previousNow = now; this.previousTime = time;
     this.previousRunning = running;
     if (running && !seeking) this.lastDisplayedTime = time;
@@ -66,19 +67,22 @@ export class DanmakuEngine {
         this.waiting.push(item);
       }
       this.waiting = this.waiting.filter(item => item.time >= time - 8 && !prefs.blockedWords.some(word => item.text.includes(word))).slice(0, 120);
-      const interval = prefs.density === 'sparse' ? .45 : prefs.density === 'dense' ? .1 : .2;
+      const minimumInterval = prefs.density === 'sparse' ? .45 : prefs.density === 'dense' ? .1 : .2;
       if (this.waiting.length && this.clock >= this.nextAdmission && this.flights.length < capacity) {
         const item = this.waiting[0];
         const text = truncateDanmaku(item.text);
         const itemWidth = this.measure(text, fontSize), speed = Math.max(70, width / 9);
-        let lane = -1;
+        let lane = -1, emptiest = Infinity;
         for (let candidate = 0; candidate < lanes; candidate++) {
           const last = this.flights.filter(flight => flight.lane === candidate).at(-1);
-          if (!last || x(last) + last.width + 28 < width) { lane = candidate; break; }
+          const tail=last?x(last)+last.width:-Infinity;
+          if ((!last || tail + 28 < width) && (lane < 0 || tail < emptiest)) { lane = candidate; emptiest=tail; }
         }
         if (lane >= 0) {
           this.waiting.shift();
           this.flights.push({ item, text, width: itemWidth, lane, born: this.clock, speed });
+          // Admit at a steady lifetime budget: filling the entire cap in a burst creates a blank band.
+          const interval=Math.max(minimumInterval,(width+itemWidth+28)/speed/capacity*1.08);
           this.nextAdmission = this.clock + interval;
         }
       }

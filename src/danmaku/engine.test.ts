@@ -65,7 +65,7 @@ describe('真实媒体时间驱动的弹幕', () => {
   it('同一时间点的一批弹幕连续排队出现，不因每帧预算直接丢失', () => {
     const e = engine(); e.merge(Array.from({ length: 12 }, (_, id) => item(id, 1, '短弹幕' + id)));
     const seen = new Set<string>(), born: number[] = [];
-    for (let n = 0; n < 300; n++) {
+    for (let n = 0; n < 360; n++) {
       for (const shown of e.step(frame(n / 60, n * 1000 / 60))) if (!seen.has(shown.id)) { seen.add(shown.id); born.push(n / 60); }
     }
     expect(seen.size).toBe(12); expect(born.at(-1)! - born[0]).toBeGreaterThan(2);
@@ -74,6 +74,20 @@ describe('真实媒体时间驱动的弹幕', () => {
   it('合并下一时间段保留正在滚动的弹幕，不清空整个画面', () => {
     const e = engine(); e.merge([item(1, 29)]); e.step(frame(29, 0));
     e.merge([item(2, 30)]); const next = e.step(frame(30, 1000));
-    expect(next.map(item => item.id)).toEqual(['12345679', '12345680']);
+    expect(next.map(item => item.id)).toContain('12345679');
+    expect(e.step(frame(30.2,1200)).map(item=>item.id)).toEqual(['12345679','12345680']);
+  });
+  it('稀疏密度持续补位，不在达到数量上限后整批等待离场', () => {
+    const e=engine();e.merge(Array.from({length:600},(_,id)=>item(id,id*.1,'连续弹幕内容'+id%5)));
+    const preferences={...defaultDanmaku,fontSize:18,density:'sparse' as const};
+    let empty=0,longest=0;
+    for(let n=0;n<60*30;n++){
+      const shown=e.step(frame(n*1.5/60,n*1000/60,{rate:1.5,preferences}));
+      expect(shown.length).toBeLessThanOrEqual(12);
+      if(n<60*8)continue;
+      const middle=shown.some(item=>item.x<1280*.65&&item.x+item.width>1280*.35);
+      empty=middle?0:empty+1;longest=Math.max(longest,empty);
+    }
+    expect(longest/60).toBeLessThan(.5);
   });
 });

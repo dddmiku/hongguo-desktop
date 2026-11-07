@@ -25,6 +25,7 @@ describe('播放会话异步取消', () => {
     }, abort.signal);
     const cancelled = expect(preparing).rejects.toMatchObject({ name: 'AbortError' });
 
+    await Promise.resolve();
     expect(request).toHaveBeenCalledOnce();
     abort.abort();
     expect(video.removeAttribute).toHaveBeenCalledWith('src');

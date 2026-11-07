@@ -51,6 +51,9 @@ class _Job:
     done: threading.Event = field(default_factory=threading.Event)
     process: object = None
     future: object = None
+    accept_hevc: bool = False
+    delivery: str = ""
+    video_codec: str = ""
 
 
 @dataclass
@@ -80,6 +83,7 @@ class MediaManager:
         self.sessions = {}
         self.closed = False
         self.pending = 0
+        self.process_slot = threading.BoundedSemaphore(1)
         self.max_pending = max(1, int(max_pending))
         self.limit = max(1, int(cache_bytes))
         try:
@@ -121,6 +125,8 @@ class MediaManager:
                            metadata["quality"], path, phase="complete", cached=True,
                            accessed=(path / "complete.json").stat().st_mtime)
                 job.duration = float(metadata.get("duration") or 0)
+                job.delivery = str(metadata.get("delivery") or "transcode")
+                job.video_codec = str(metadata.get("videoCodec") or "h264")
                 if not job.duration:
                     text = (path / "index.m3u8").read_text(encoding="utf-8")
                     if "#EXT-X-ENDLIST" in text:
@@ -147,10 +153,13 @@ class MediaManager:
         return sid, int(episode), quality
 
     def create(self, series_id, episode, quality="auto", start=0,
-               prefetch=False, base_url=""):
+               prefetch=False, base_url="", accept_hevc=False):
         sid, episode, quality = self._identity(series_id, episode, quality, start)
+        if not isinstance(accept_hevc, bool):
+            raise ValueError("解码能力参数不合法")
         # 从零处理整集，拖动/回看由 HLS 客户端完成，起播位置不拆出第二份缓存。
-        key = hashlib.sha256(f"{_OWNER}:{sid}:{episode}:{quality}".encode()).hexdigest()
+        profile = ":hevc" if accept_hevc else ""
+        key = hashlib.sha256(f"{_OWNER}:{sid}:{episode}:{quality}{profile}".encode()).hexdigest()
         with self.guard:
             if self.closed:
                 raise MediaBusy("媒体服务已关闭")
@@ -165,7 +174,7 @@ class MediaManager:
             if job is None:
                 if self.pending >= self.max_pending:
                     raise MediaBusy("媒体队列已满，请稍后重试")
-                job = _Job(key, sid, episode, quality, self.root / (key + ".part"))
+                job = _Job(key, sid, episode, quality, self.root / (key + ".part"), accept_hevc=accept_hevc)
                 self.jobs[key] = job
                 self.pending += 1
                 job.future = self.pool.submit(self._run, job)
@@ -200,6 +209,9 @@ class MediaManager:
             out["error"] = job.error
         if job.duration > 0:
             out["duration"] = job.duration
+        if job.delivery:
+            out["delivery"] = job.delivery
+            out["videoCodec"] = job.video_codec
         return out
 
     def get(self, identifier, base_url=""):
@@ -252,6 +264,7 @@ class MediaManager:
 
     def _command(self, source, directory):
         return [self.ffmpeg_path, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-threads", "2", "-filter_threads", "1",
                 "-i", source.as_posix(), "-map", "0:v:0", "-map", "0:a?",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-threads", "2",
                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-ac", "2",
@@ -260,6 +273,52 @@ class MediaManager:
                 "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
                 "-hls_segment_filename", (directory / "seg%06d.m4s").as_posix(),
                 "-hls_flags", "independent_segments+temp_file", (directory / "index.m3u8").as_posix()]
+
+    def _delivery_command(self, source, job):
+        # Hardware HEVC support is checked by the actual renderer, never guessed from a CPU name.
+        codec, audio, pixel_format = "", "", ""
+        try:
+            import av
+            with av.open(str(source)) as container:
+                video = container.streams.video[0]
+                codec = video.codec_context.name
+                pixel_format = video.codec_context.format.name
+                audio = container.streams.audio[0].codec_context.name if container.streams.audio else ""
+        except Exception:
+            pass
+        copy_video = pixel_format == "yuv420p" and (codec == "h264" or codec == "hevc" and job.accept_hevc)
+        job.delivery = "remux" if copy_video else "transcode"
+        job.video_codec = codec if copy_video else "h264"
+        command = self._command(source, job.directory)
+        if copy_video:
+            start, end = command.index("-c:v"), command.index("-hls_time")
+            options = ["-c:v", "copy"]
+            if codec == "hevc": options.extend(["-tag:v", "hvc1"])
+            options.extend(["-c:a", "copy"] if audio in ("", "aac") else ["-c:a", "aac", "-b:a", "128k", "-ac", "2"])
+            command[start:end] = options
+        return command
+
+    def _render(self, job, command):
+        # Downloads can overlap. Only one conversion owns decoder/encoder memory at a time.
+        while not self.process_slot.acquire(timeout=.05):
+            if job.stop.is_set(): raise MediaCancelled()
+        try:
+            if job.stop.is_set(): raise MediaCancelled()
+            with (job.directory / "encode.log").open("wb") as errors:
+                process = subprocess.Popen(command, cwd=job.directory,
+                                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors,
+                                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                                           | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
+                with self.guard: job.process = process
+                while process.poll() is None:
+                    if job.stop.wait(.05):
+                        self._terminate(process)
+                        raise MediaCancelled()
+                    self._mark_ready(job)
+                if job.stop.is_set(): raise MediaCancelled()
+                if process.returncode != 0: raise RuntimeError("视频转换失败")
+        finally:
+            self.process_slot.release()
 
     def _run(self, job):
         source = None
@@ -276,23 +335,7 @@ class MediaManager:
             job.duration = self._source_duration(source, job)
             job.directory.mkdir(exist_ok=False)
             (job.directory / "owner").write_text(_OWNER, encoding="ascii")
-            with (job.directory / "encode.log").open("wb") as errors:
-                process = subprocess.Popen(self._command(source, job.directory),
-                                           cwd=job.directory,
-                                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                           stderr=errors,
-                                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                with self.guard:
-                    job.process = process
-                while process.poll() is None:
-                    if job.stop.wait(0.05):
-                        self._terminate(process)
-                        raise MediaCancelled()
-                    self._mark_ready(job)
-                if job.stop.is_set():
-                    raise MediaCancelled()
-                if process.returncode != 0:
-                    raise RuntimeError("视频转码失败")
+            self._render(job, self._delivery_command(source, job))
             manifest = job.directory / "index.m3u8"
             text = manifest.read_text(encoding="utf-8")
             if "#EXT-X-ENDLIST" not in text or not self._mark_ready(job):
@@ -302,7 +345,8 @@ class MediaManager:
             if not job.duration:
                 job.duration = sum(float(value) for value in re.findall(r"^#EXTINF:([0-9.]+),", text, re.MULTILINE))
             metadata = {"owner": _OWNER, "seriesId": job.series_id,
-                        "episode": job.episode, "quality": job.quality, "duration": job.duration}
+                        "episode": job.episode, "quality": job.quality, "duration": job.duration,
+                        "delivery": job.delivery, "videoCodec": job.video_codec}
             (job.directory / "complete.json").write_text(json.dumps(metadata), encoding="utf-8")
             self._promote(job)
         except Exception as error:
@@ -509,7 +553,7 @@ def mount_media(app, manager):
         try:
             return manager.create(body.get("seriesId"), body.get("episode"),
                                   body.get("quality", "auto"), body.get("start", 0),
-                                  bool(body.get("prefetch", False)), str(request.base_url))
+                                  bool(body.get("prefetch", False)), str(request.base_url), body.get("acceptHevc", False))
         except (ValueError, TypeError, OverflowError) as error:
             raise HTTPException(400, str(error)) from None
         except MediaBusy as error:

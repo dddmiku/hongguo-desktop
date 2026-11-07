@@ -330,7 +330,7 @@ def main():
         ffmpeg = runtime / "ffmpeg" / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
         if not ffmpeg.is_file():
             ffmpeg = runtime / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
-        manager = MediaManager(provider, data, ffmpeg, secrets.token_hex(32))
+        manager = MediaManager(provider, data, ffmpeg, secrets.token_hex(32), max_workers=2)
         state["media"] = manager
         server = uvicorn.Server(uvicorn.Config(create_app(provider, token, manager, signer.alive),
             host="127.0.0.1", port=port, log_config=None, access_log=False, log_level="critical",

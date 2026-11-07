@@ -10,6 +10,8 @@ import type { HistoryItem, HistoryQuery, Library, PlaybackProgress, Series, Sess
 
 app.setName('红果桌面');
 if(process.env.HG_TEST_DATA_DIR)app.setPath('userData',process.env.HG_TEST_DATA_DIR);
+const backgroundQA=!!process.env.HG_TEST_DATA_DIR&&process.env.HG_TEST_BACKGROUND==='1';
+const startHidden=backgroundQA||process.argv.includes('--start-hidden');
 let window:BrowserWindow, tray:Tray, store:Store, supervisor:Supervisor, quitting=false,currentUid='local';
 let syncing:Promise<{library:Library;warnings:string[]}>|undefined;
 const favoriteWrites=new Map<string,Promise<Library>>();
@@ -101,12 +103,15 @@ async function boot(){
   const runtime=app.isPackaged?path.join(process.resourcesPath,'runtime'):path.join(app.getAppPath(),'runtime');
   const data=process.env.HG_TEST_DATA_DIR||app.getPath('userData');await fs.mkdir(data,{recursive:true});
   store=new Store(path.join(data,'library.json'));await store.load();supervisor=new Supervisor(root,runtime,data);
-  window=new BrowserWindow({width:1440,height:960,minWidth:940,minHeight:640,frame:false,title:'红果桌面',backgroundColor:'#101014',icon:windowIcon(),webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true}});
+  window=new BrowserWindow({width:1440,height:960,minWidth:940,minHeight:640,show:!startHidden,frame:false,title:'红果桌面',backgroundColor:'#101014',icon:windowIcon(),webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true,...(backgroundQA?{backgroundThrottling:false,offscreen:true}:{})}});
+  if(backgroundQA)window.webContents.setFrameRate(60);
   window.webContents.setWindowOpenHandler(()=>({action:'deny'}));window.webContents.on('will-navigate',(e)=>e.preventDefault());
   window.on('close',event=>{if(!quitting&&store.settings().closeToTray){event.preventDefault();window.hide();}});
   window.on('hide',()=>window.webContents.send('window:visibility',false));
   window.on('show',()=>window.webContents.send('window:visibility',true));
-  tray=new Tray(windowIcon());tray.setToolTip('红果桌面');tray.setContextMenu(Menu.buildFromTemplate([{label:'打开红果桌面',click:()=>{window.show();window.focus();}},{type:'separator'},{label:'退出',click:()=>app.quit()}]));tray.on('double-click',()=>{window.show();window.focus();});
+  window.on('minimize',()=>window.webContents.send('window:visibility',false));
+  window.on('restore',()=>window.webContents.send('window:visibility',true));
+  if(!backgroundQA){tray=new Tray(windowIcon());tray.setToolTip('红果桌面');tray.setContextMenu(Menu.buildFromTemplate([{label:'打开红果桌面',click:()=>{window.show();window.focus();}},{type:'separator'},{label:'退出',click:()=>app.quit()}]));tray.on('double-click',()=>{window.show();window.focus();});}
   handle('api:request',async(route:string,options={})=>{if(typeof route!=='string'||!allowed.test(route)||route.length>3000)throw new Error('无效接口');if(JSON.stringify(options).length>100000)throw new Error('请求内容过大');const result=await supervisor.request(route,options);if(/^\/catalog\/(home|search|rank|browse)(\?|$)/.test(route)&&!firstCatalogShown){firstCatalogShown=true;startupSyncTimer=setTimeout(startLibrarySync,500);}if(route==='/account/login'||route==='/account/logout'||route==='/account/mfa/verify')await refreshIdentity();return result;});
   handle('settings:get',()=>store.settings());handle('settings:save',async(value:Partial<Settings>)=>{const old=store.settings();const settings=await store.saveSettings(value);if(value.bossKey!==undefined&&value.bossKey!==old.bossKey){try{setBossKey(settings);}catch(e){await store.saveSettings({bossKey:old.bossKey});try{setBossKey(old);}catch{}throw e;}}nativeTheme.themeSource=settings.theme;if(value.cacheGB!==undefined)await supervisor.request('/media/cache/settings',{method:'POST',body:{cacheGB:settings.cacheGB}}).catch(()=>{});return settings;});
   handle('library:get',()=>store.library(currentUid));handle('library:progress',async(value:PlaybackProgress)=>{const uid=currentUid;const item=await store.progress(uid,value);if(uid!=='local'){liveWrites.set(uid+':'+value.series.id,item.watchedAt);void pump();}});
@@ -129,14 +134,14 @@ async function boot(){
   handle('external:open',async(url:string)=>{const u=new URL(url);if(u.protocol!=='https:'||!['github.com','gh-proxy.com'].includes(u.hostname))throw new Error('不支持的链接');await shell.openExternal(url);});
   handle('diagnostics:export',async()=>{const source=await supervisor.diagnostics();const choice=await dialog.showSaveDialog(window,{title:'导出诊断',defaultPath:'红果桌面-诊断.jsonl'});if(choice.canceled||!choice.filePath)return '';await fs.copyFile(source,choice.filePath);return choice.filePath;});
   handle('update:check',updateInfo);handle('update:download',downloadUpdate);
-  nativeTheme.themeSource=store.settings().theme;try{setBossKey(store.settings());}catch{}
+  nativeTheme.themeSource=store.settings().theme;if(!backgroundQA)try{setBossKey(store.settings());}catch{}
   await window.loadFile(path.join(app.getAppPath(),'dist','index.html'));
   void supervisor.start().then(async()=>{await migrateLegacy(data);const session=await refreshIdentity();if(session?.loggedIn){startupSyncTimer=setTimeout(startLibrarySync,firstCatalogShown?500:8000);}}).catch(()=>{});
   const timer=setInterval(()=>void pump(),5000);timer.unref();
 }
 if(!app.requestSingleInstanceLock())app.quit();else{
   app.on('second-instance',()=>{if(window){window.show();window.focus();}});
-  app.whenReady().then(boot).catch(async(error)=>{await dialog.showMessageBox({type:'error',message:'客户端启动失败',detail:String(error.message)});app.quit();});
+  app.whenReady().then(boot).catch(async(error)=>{if(!startHidden)await dialog.showMessageBox({type:'error',message:'客户端启动失败',detail:String(error.message)});else console.error('客户端启动失败：',String(error.message));app.quit();});
   app.on('before-quit',event=>{if(quitting)return;event.preventDefault();quitting=true;clearTimeout(startupSyncTimer);clearTimeout(historyTimer);globalShortcut.unregisterAll();
     const flushRenderer=new Promise<void>(resolve=>{if(!window||window.isDestroyed()){resolve();return;}const listener=(e:Electron.IpcMainEvent)=>{if(e.sender===window.webContents){clearTimeout(timer);ipcMain.removeListener('app:flushed',listener);resolve();}};const timer=setTimeout(()=>{ipcMain.removeListener('app:flushed',listener);resolve();},1500);ipcMain.on('app:flushed',listener);window.webContents.send('app:flush');});
     void flushRenderer.then(()=>store?.flush()).then(()=>supervisor?.stop()).finally(()=>{store?.close();app.quit();});

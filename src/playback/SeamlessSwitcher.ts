@@ -1,11 +1,11 @@
-export interface PlaybackTarget { seriesId: string; episode: number; quality: string; start: number; duration?: number; }
+export interface PlaybackTarget { seriesId: string; episode: number; quality: string; start: number; duration?: number; compatible?: boolean; }
 export interface PreparedDeck { index: number; target: PlaybackTarget; release(): void | Promise<void>; }
 export interface DeckAdapter<T extends PreparedDeck> {
   prepare(index: number, target: PlaybackTarget, signal: AbortSignal): Promise<T>;
   present(next: T, previous: T | null, automatic: boolean): void;
   afterPresent(): Promise<void>;
 }
-const same = (a: PlaybackTarget, b: PlaybackTarget) => a.seriesId === b.seriesId && a.episode === b.episode && a.quality === b.quality && Math.abs(a.start - b.start) < .1;
+const same = (a: PlaybackTarget, b: PlaybackTarget) => a.seriesId === b.seriesId && a.episode === b.episode && a.quality === b.quality && !!a.compatible === !!b.compatible && Math.abs(a.start - b.start) < .1;
 type Operation<T> = { target: PlaybackTarget; warm: boolean; abort: AbortController; promise: Promise<T>; deck?: T };
 
 /** Keep the displayed deck alive until the replacement has a decoded frame. */

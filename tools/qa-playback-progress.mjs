@@ -22,7 +22,7 @@ try{
   detail=await page.evaluate(id=>window.hongguo.request('/catalog/series/'+id),series.id);
   console.log(JSON.stringify({publicTitle:series.title,episodes:detail.episodes.length,firstMetadataDuration:detail.episodes[0]?.duration}));
   await page.getByLabel('搜索剧名、演员或关键词').fill(query);await page.getByLabel('搜索剧名、演员或关键词').press('Enter');
-  const card=page.locator('.series-card').filter({hasText:series.title}).first();await card.waitFor({timeout:90000});
+  const card=page.locator(`.series-card[data-series-id="${series.id}"]`).first();await card.waitFor({timeout:90000});
   await card.locator('.series-poster-button').click();await page.waitForSelector('.detail-hero',{timeout:60000});
   await page.evaluate(()=>{
     window.__progressSamples=[];window.__progressStage='cold';window.__progressTimer=setInterval(()=>{
@@ -61,7 +61,7 @@ try{
     const paused=await page.locator('video[data-active=true]').evaluate(video=>({episode:Number(video.dataset.episode),position:video.currentTime,paused:video.paused}));
     await page.waitForFunction(async(value)=>{const library=await window.hongguo.getLibrary();const item=library.history.find(item=>item.series.id===value.sid);return item?.episode===value.episode&&Math.abs(item.position-value.position)<.2;},{sid:series.id,...paused},{timeout:10000});
     const saved=await page.evaluate(async sid=>(await window.hongguo.getLibrary()).history.find(item=>item.series.id===sid),series.id);
-    check('真实暂停事件立即保存当前位置及完整时长',paused.paused&&saved.duration>20,{position:paused.position,savedPosition:saved.position,duration:saved.duration});
+    check('真实暂停事件立即保存当前位置及完整时长',paused.paused&&saved.duration>20&&Math.abs(saved.position-paused.position)<.2,{position:paused.position,savedPosition:saved.position,duration:saved.duration});
     await page.evaluate(()=>{window.__progressStage='cached-replay';});
     await page.getByRole('button',{name:'播放第1集',exact:true}).click();
     await page.waitForFunction(()=>{const v=document.querySelector('video[data-active=true]');return v?.dataset.episode==='1'&&v.currentTime>.2&&!v.paused;},undefined,{timeout:120000});

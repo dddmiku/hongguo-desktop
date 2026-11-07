@@ -2,6 +2,7 @@ import Hls from 'hls.js';
 import type { MediaSession, NativeBridge } from '../../shared/contracts';
 import type { PlaybackTarget, PreparedDeck } from './SeamlessSwitcher';
 import {episodeDuration} from './timeline';
+import {hardwareHevc} from './capabilities';
 
 export interface VideoDeck extends PreparedDeck { video: HTMLVideoElement; hls: Hls | null; sessionId: string; duration: number; }
 const aborted = () => new DOMException('Cancelled', 'AbortError');
@@ -30,7 +31,9 @@ export class HlsDeckLoader {
     this.decks.set(index, deck);
     const abort = () => { void deck.release(); }; signal.addEventListener('abort', abort, { once: true });
     try {
-      let session = await this.bridge.request<MediaSession>('/media/session', { method: 'POST', body: { seriesId: target.seriesId, episode: target.episode, quality: target.quality, start: target.start } });
+      const acceptHevc = !target.compatible && await hardwareHevc();
+      if (signal.aborted || released) throw aborted();
+      let session = await this.bridge.request<MediaSession>('/media/session', { method: 'POST', body: { seriesId: target.seriesId, episode: target.episode, quality: target.quality, start: target.start, ...(acceptHevc ? {acceptHevc:true} : {}) } });
       sessionId = session.id; deck.sessionId = session.id;
       if (signal.aborted || released) { void this.bridge.request(`/media/session/${sessionId}`, { method: 'DELETE' }).catch(() => {}); throw aborted(); }
       leaseTimer=setInterval(()=>{if(!released)void this.bridge.request(`/media/session/${sessionId}`).catch(()=>{});},60000);
@@ -70,14 +73,19 @@ export class HlsDeckLoader {
         };
         for (const name of ['loadeddata', 'loadedmetadata', 'durationchange', 'canplay', 'seeked']) video.addEventListener(name, ready);
         if (Hls.isSupported()) {
-          engine = new Hls({ enableWorker: true, maxBufferLength: 25, maxMaxBufferLength: 60, backBufferLength: 20,
+          engine = new Hls({ enableWorker: true, maxBufferLength: 6, maxMaxBufferLength: 12, maxBufferSize: 8*1024*1024, backBufferLength: 3,
             startPosition:0,lowLatencyMode:false,liveSyncDuration:86400,liveMaxLatencyDuration:Infinity,maxLiveSyncPlaybackRate:1,
             manifestLoadingMaxRetry: 8, fragLoadingMaxRetry: 8, manifestLoadingRetryDelay: 800, fragLoadingRetryDelay: 800 });
           deck.hls = engine;
           engine.on(Hls.Events.MANIFEST_PARSED, ready); engine.on(Hls.Events.LEVEL_UPDATED, ready);
           engine.on(Hls.Events.ERROR, (_event, data) => {
             if (!data.fatal || released || signal.aborted) return;
-            if (data.type === Hls.ErrorTypes.MEDIA_ERROR) engine?.recoverMediaError();
+            if (data.type === Hls.ErrorTypes.MEDIA_ERROR && acceptHevc) {
+              target.compatible = true;
+              if (!settled) finish(new Error('显卡解码暂不可用，正在切换兼容播放'));
+              else this.onFatal(deck, '显卡解码暂不可用，正在切换兼容播放');
+            }
+            else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) engine?.recoverMediaError();
             else if (!settled) finish(new Error('网络或片源中断，请重试'));
             else this.onFatal(deck, '网络或片源中断，重试可从当前进度继续');
           });
@@ -86,8 +94,13 @@ export class HlsDeckLoader {
         else finish(new Error('当前设备不支持视频播放'));
       });
       if (signal.aborted) throw aborted();
+      deck.hls?.stopLoad();
       signal.removeEventListener('abort', abort);
       return deck;
-    } catch (error) { signal.removeEventListener('abort', abort); void deck.release(); throw error; }
+    } catch (error) {
+      signal.removeEventListener('abort', abort); void deck.release();
+      if (target.compatible && !signal.aborted && (error as Error).message === '显卡解码暂不可用，正在切换兼容播放') return this.prepare(index,target,signal);
+      throw error;
+    }
   }
 }

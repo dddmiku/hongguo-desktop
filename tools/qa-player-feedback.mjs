@@ -17,7 +17,7 @@ try{
  if(previous)await page.evaluate(series=>window.hongguo.toggleFavorite(series,false),previous);
  await page.evaluate(()=>window.hongguo.saveSettings({autoplay:false,rate:1.5,quality:'1080p',volume:0,danmaku:{enabled:true,opacity:.8,fontSize:22,area:.5,density:'standard',blockedWords:[]}}));await page.reload();
  await page.getByLabel('搜索剧名、演员或关键词').fill(query);await page.getByLabel('搜索剧名、演员或关键词').press('Enter');
- const card=page.locator('.series-card').filter({hasText:query}).first();await card.waitFor({timeout:90000});await card.locator('.series-poster-button').click();
+ const card=page.locator(`.series-card[data-series-id="${sid}"]`).first();await card.waitFor({timeout:90000});await card.locator('.series-poster-button').click();
  if(affected)await page.getByRole('button',{name:/显示更多集数/}).click();
  await page.getByRole('dialog').getByRole('button',{name:`播放第 ${episode} 集`,exact:true}).click();
  await page.waitForFunction(()=>document.querySelector('video[data-active=true]')?.currentTime>1,undefined,{timeout:180000});

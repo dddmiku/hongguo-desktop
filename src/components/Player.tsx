@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Play, Pause, SkipForward, Volume2, VolumeX, Maximize, Minimize, MessageSquare, RotateCcw, ChevronLeft, ChevronRight, X, Heart, Monitor, SlidersHorizontal, LoaderCircle } from 'lucide-react';
-import type { CommentsPage, Episode, MediaSession, SeriesDetail, Settings } from '../../shared/contracts';
+import type { CommentsPage, Episode, SeriesDetail, Settings } from '../../shared/contracts';
 import { SeamlessSwitcher, type PlaybackTarget } from '../playback/SeamlessSwitcher';
 import { HlsDeckLoader, type VideoDeck } from '../playback/HlsDeck';
 import {availablePosition,knownDuration} from '../playback/timeline';
@@ -9,16 +9,17 @@ import type { DanmakuStatus } from '../danmaku/feed';
 import Danmaku from './Danmaku';
 import DanmakuPanel from './DanmakuPanel';
 import './Player.css';
-type Props = { detail: SeriesDetail; initialEpisode: number; initialPosition?: number; settings: Settings; accountKey?: string; onClose: () => void; onSettings: (patch: Partial<Settings>) => void; onLibrary: () => void };
+type Props = { detail: SeriesDetail; initialEpisode: number; initialPosition?: number; isActive?: boolean; settings: Settings; accountKey?: string; onClose: () => void; onSettings: (patch: Partial<Settings>) => void; onLibrary: () => void };
 const time = (n: number) => Number.isFinite(n) && n >= 0 ? `${Math.floor(n / 60).toString().padStart(2, '0')}:${Math.floor(n % 60).toString().padStart(2, '0')}` : '00:00';
 const rates = [.75, 1, 1.25, 1.5, 2, 2.5, 3];
 const commentTime = (value: string) => { const date = new Date(value); return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date); };
 const nextPaint = () => new Promise<void>(resolve => { const timer = setTimeout(resolve, 180); requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(timer); resolve(); })); });
-export default function Player({ detail, initialEpisode, initialPosition = 0, settings, accountKey = 'local', onClose, onSettings, onLibrary }: Props) {
+export default function Player({ detail, initialEpisode, initialPosition = 0, isActive = true, settings, accountKey = 'local', onClose, onSettings, onLibrary }: Props) {
   const videos = useRef<(HTMLVideoElement | null)[]>([null, null]), playbackLayout = useRef<HTMLDivElement>(null);
   const switcher = useRef<SeamlessSwitcher<VideoDeck> | null>(null), fullscreenBusy = useRef(false), clickTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined), hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const prefetch = useRef(new Map<string, string>()), closed = useRef(false), visible = useRef(true), shouldPlay = useRef(true), automaticSwitch = useRef(false), lastSaved = useRef(0), mounted = useRef(false);
-  const latest = useRef({ detail, settings, onSettings, onLibrary, onClose }); latest.current = { detail, settings, onSettings, onLibrary, onClose };
+  const closed = useRef(false), visible = useRef(isActive), shouldPlay = useRef(true), automaticSwitch = useRef(false), lastSaved = useRef(0), mounted = useRef(false);
+  const resumeAfterNavigation=useRef(false),windowVisible=useRef(true),compatible=useRef(false);
+  const latest = useRef({ detail, settings, onSettings, onLibrary, onClose, isActive }); latest.current = { detail, settings, onSettings, onLibrary, onClose, isActive };
   const mutedRef = useRef(false), requested = useRef<PlaybackTarget | null>(null);
   const episodeDurations=useRef(new Map<string,number>());
   const theaterScroll=useRef(0),theaterRef=useRef(false);
@@ -67,9 +68,10 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, se
   };
   const toggleTheater=useCallback(()=>{const scroll=playbackLayout.current?.closest('.content-scroll') as HTMLElement|null;const next=!theaterRef.current;if(next)theaterScroll.current=scroll?.scrollTop||0;theaterRef.current=next;setTheater(next);requestAnimationFrame(()=>{if(scroll)scroll.scrollTop=next?0:theaterScroll.current;});hide();},[hide]);
   const applySound = (deck: VideoDeck) => { const s = latest.current.settings; deck.video.playbackRate = s.rate; deck.video.volume = s.volume; deck.video.muted = mutedRef.current; };
-  const target = (index: number, start = 0): PlaybackTarget => ({ seriesId: latest.current.detail.series.id, episode: index, quality: latest.current.settings.quality, start,
+  const target = (index: number, start = 0): PlaybackTarget => ({ seriesId: latest.current.detail.series.id, episode: index, quality: latest.current.settings.quality, start, compatible:compatible.current,
     duration:episodeDurations.current.get(`${latest.current.detail.series.id}:${index}`)||knownDuration(latest.current.detail.episodes.find(item=>item.index===index)?.duration) });
   const scheduleNext = useCallback((deck: VideoDeck) => {
+    if (!latest.current.isActive || !visible.current) return;
     const next = latest.current.detail.episodes.find(item => item.index === deck.target.episode + 1);
     if (next) switcher.current?.warm(target(next.index));
   }, []);
@@ -95,11 +97,14 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, se
     mounted.current = true; closed.current = false;
     const elements = videos.current.filter((element): element is HTMLVideoElement => !!element);
     const loader = new HlsDeckLoader(elements, window.hongguo, (deck, message) => {
+      if(current()===deck&&deck.target.compatible&&!compatible.current){compatible.current=true;void selectEpisode(deck.target.episode,false,deck.video.currentTime,true,true);return;}
       if (current() === deck && mounted.current) { setError(message); setChrome(true); shouldPlay.current = false; }
     });
     const controller = new SeamlessSwitcher<VideoDeck>({
       prepare: (index, wanted, signal) => loader.prepare(index, wanted, signal),
       present: (deck, previous, automatic) => {
+        if(deck.target.compatible)compatible.current=true;
+        if(deck.hls){Object.assign(deck.hls.config,{maxBufferLength:18,maxMaxBufferLength:30,maxBufferSize:12*1024*1024,backBufferLength:8});if(visible.current)deck.hls.startLoad(deck.video.currentTime);}
         deck.video.dataset.active = 'true'; deck.video.dataset.episode=String(deck.target.episode);deck.video.style.zIndex = '1'; deck.video.style.visibility = 'visible';
         if (previous) { previous.video.muted = true; previous.video.pause(); previous.video.dataset.active = 'false'; previous.video.style.zIndex = '0'; }
         const full=episodeDurations.current.get(`${deck.target.seriesId}:${deck.target.episode}`)||knownDuration(deck.duration);
@@ -113,28 +118,27 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, se
     });
     switcher.current = controller; void selectEpisode(initialEpisode, false, initialPosition);
     void window.hongguo.getLibrary().then(lib => { if (mounted.current&&!favoritePending.current) setFavorite(lib.favorites.some(series => series.id === detail.series.id)); }).catch(()=>{});
-    return () => { mounted.current = false; closed.current = true; clearTimeout(clickTimer.current); clearTimeout(hideTimer.current); void saveDeck(controller.current); void controller.close(); for (const id of prefetch.current.values()) if (id !== 'pending') void window.hongguo.request(`/media/session/${id}`, { method: 'DELETE' }).catch(() => {}); prefetch.current.clear(); };
+    return () => { mounted.current = false; closed.current = true; clearTimeout(clickTimer.current); clearTimeout(hideTimer.current); void saveDeck(controller.current); void controller.close(); };
   }, [detail.series.id, initialEpisode, initialPosition, hide, selectEpisode, saveDeck]);
   useEffect(() => {
     const deck = current(); if (!deck) return;
+    if(!isActive)return;
     if (deck.target.quality !== settings.quality) { switcher.current?.cancelPending(); void selectEpisode(deck.target.episode, false, deck.video.currentTime, true); }
     else applySound(deck);
-  }, [settings.rate, settings.volume, settings.quality, muted, selectEpisode]);
+  }, [settings.rate, settings.volume, settings.quality, muted, selectEpisode, isActive]);
   useEffect(() => {
-    const refresh = () => {
-      const deck = current(); if (!deck) return; scheduleNext(deck);
-      const wanted = `${deck.target.episode + 2}:${latest.current.settings.quality}`;
-      for (const [key, id] of prefetch.current) if (key !== wanted) { prefetch.current.delete(key); if (id !== 'pending') void window.hongguo.request(`/media/session/${id}`, { method: 'DELETE' }).catch(() => {}); }
-      const second = latest.current.detail.episodes.find(item => item.index === deck.target.episode + 2);
-      if (!second || prefetch.current.has(wanted)) return;
-      prefetch.current.set(wanted, 'pending');
-      void window.hongguo.request<MediaSession>('/media/session', { method: 'POST', body: { seriesId: deck.target.seriesId, episode: second.index, quality: latest.current.settings.quality, prefetch: true } }).then(session => {
-        if (closed.current || !prefetch.current.has(wanted)) void window.hongguo.request(`/media/session/${session.id}`, { method: 'DELETE' }).catch(() => {});
-        else prefetch.current.set(wanted, session.id);
-      }).catch(() => prefetch.current.delete(wanted));
-    };
-    refresh(); const timer = setInterval(refresh, 12000); return () => clearInterval(timer);
-  }, [episode, settings.quality, scheduleNext]);
+    visible.current=isActive&&windowVisible.current;
+    const deck=current();
+    if(!isActive){
+      resumeAfterNavigation.current=deck?!deck.video.paused:shouldPlay.current;
+      shouldPlay.current=false;void saveDeck(deck);deck?.video.pause();deck?.hls?.stopLoad();switcher.current?.cancelPending();
+      requested.current=null;setPendingEpisode(null);setPendingPosition(null);clearTimeout(hideTimer.current);
+    }else if(deck){
+      shouldPlay.current=resumeAfterNavigation.current||shouldPlay.current;
+      deck.hls?.startLoad(deck.video.currentTime);scheduleNext(deck);
+      if(shouldPlay.current&&visible.current)void deck.video.play().catch(()=>{});
+    }else if(mounted.current&&!requested.current){shouldPlay.current=resumeAfterNavigation.current;void selectEpisode(initialEpisode,false,initialPosition);}
+  },[isActive,saveDeck,scheduleNext,selectEpisode,initialEpisode,initialPosition]);
   const toggleFullscreen = useCallback(async () => {
     const layout = playbackLayout.current; if (!layout || fullscreenBusy.current) return; fullscreenBusy.current = true;
     try { if (document.fullscreenElement === layout) await document.exitFullscreen(); else await layout.requestFullscreen(); hide(); }
@@ -145,7 +149,7 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, se
     const deck = current(); if (!deck || error) return;
     shouldPlay.current = deck.video.paused; if (shouldPlay.current && visible.current) { applySound(deck); void deck.video.play().catch(() => {}); } else deck.video.pause(); hide();
   }, [error, hide]);
-  useEffect(() => window.hongguo.onVisibility(value => { visible.current = value; if (!value) { shouldPlay.current = false; void save(); current()?.video.pause(); } }), [save]);
+  useEffect(() => window.hongguo.onVisibility(value => { windowVisible.current=value;visible.current = value&&latest.current.isActive; if (!value) { shouldPlay.current = false;resumeAfterNavigation.current=false; void save(); current()?.video.pause();current()?.hls?.stopLoad();switcher.current?.cancelPending(); }else if(latest.current.isActive){const deck=current();deck?.hls?.startLoad(deck.video.currentTime);if(deck)scheduleNext(deck);} }), [save,scheduleNext]);
   useEffect(() => window.hongguo.onShutdown(save), [save]);
   const seekTo=useCallback((value:number)=>{const deck=current();if(!deck||!knownDuration(deck.duration))return;
     const destination=Math.min(Math.max(0,value),Math.max(0,deck.duration-.05));
@@ -157,6 +161,7 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, se
   const close = useCallback(() => { if (closed.current) return; closed.current = true; shouldPlay.current = false; void save(); current()?.video.pause(); if (document.fullscreenElement === playbackLayout.current) void document.exitFullscreen().catch(() => {}).finally(() => latest.current.onClose()); else latest.current.onClose(); }, [save]);
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
+      if(!latest.current.isActive)return;
       const field = event.target instanceof HTMLInputElement ? event.target : null;
       if (event.ctrlKey || event.altKey || event.metaKey || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || field && field.type !== 'range' || event.target instanceof HTMLElement && event.target.isContentEditable) return;
       if (field?.type === 'range' && /^(Arrow|Home|End|Page)/.test(event.key)) return;
@@ -183,7 +188,7 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, se
         onClick={()=>{if(current()?.index!==index)return;clearTimeout(clickTimer.current);clickTimer.current=setTimeout(toggle,220);}} onDoubleClick={()=>{if(current()?.index!==index)return;clearTimeout(clickTimer.current);void toggleFullscreen();}}
         onTimeUpdate={()=>onTime(index)} onDurationChange={()=>onTime(index)} onProgress={()=>onTime(index)} onPlaying={()=>{if(current()?.index!==index)return;setPlaying(true);setPhase('');if(automaticSwitch.current){automaticSwitch.current=false;setChrome(false);}else hide();}}
       onPause={()=>{const deck=current();if(deck?.index!==index)return;setPlaying(false);const naturallyEnding=latest.current.settings.autoplay&&deck.video.ended;if(!naturallyEnding&&!automaticSwitch.current&&!requested.current){setChrome(true);void saveDeck(deck);}}} onWaiting={()=>{if(current()?.index===index&&!requested.current)setPhase('缓冲中');}} onEnded={()=>ended(index)}/>)}
-      {episodeMeta && <Danmaku seriesId={detail.series.id} episode={episode} vid={episodeMeta.vid} accountKey={accountKey} getVideo={activeVideo} initialTime={episode === initialEpisode ? initialPosition : 0} metadataDuration={duration || episodeMeta.duration || 0} preferences={danmakuSettings} refreshToken={danmakuRefresh} onStatus={setDanmakuStatus}/>}
+      {episodeMeta && <Danmaku seriesId={detail.series.id} episode={episode} vid={episodeMeta.vid} accountKey={accountKey} isActive={isActive} getVideo={activeVideo} initialTime={episode === initialEpisode ? initialPosition : 0} metadataDuration={duration || episodeMeta.duration || 0} preferences={danmakuSettings} refreshToken={danmakuRefresh} onStatus={setDanmakuStatus}/>}
       {notice&&<div className="player-notice player-feedback" role="status">{favoriteBusy&&<LoaderCircle className="spin" size={17}/>}<span>{notice}</span><button aria-label="关闭播放提示" onClick={()=>setNotice('')}><X size={15}/></button></div>}
       {phase&&!error&&!current()&&<div className="player-status"><div className={playing?'':'spinner'}/><span>{phase}</span>{phase==='点击开始播放'&&<button className="btn primary" onClick={toggle}><Play size={18}/>播放</button>}</div>}
       {error&&<div className={`player-error ${current()?"switch-error":""}`}><RotateCcw size={28}/><h3>暂时无法播放</h3><p>{error}</p><button className="btn primary" onClick={()=>{const wanted=requested.current??current()?.target??target(initialEpisode,initialPosition);void selectEpisode(wanted.episode,false,wanted.start,false,true);}}>重试当前集</button></div>}
@@ -206,9 +211,12 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, se
       </div></div>{comments&&<Comments seriesId={detail.series.id} episode={episode} onClose={()=>setComments(false)}/>}</div>
 
     <div className="episode-heading"><div><h3>选集</h3><span>{episodeMeta?.title||`第 ${episode} 集`}</span></div><div className="episode-actions"><label className="autoplay-switch"><input type="checkbox" checked={settings.autoplay} onChange={e=>onSettings({autoplay:e.target.checked})}/> 自动连播</label><button className="icon-button" aria-label="上一集" disabled={nextEpisode()<=1} onClick={()=>selectEpisode(nextEpisode()-1)}><ChevronLeft size={20}/></button><button className="icon-button" aria-label="下一集" disabled={nextEpisode()>=detail.episodes.length} onClick={()=>selectEpisode(nextEpisode()+1)}><ChevronRight size={20}/></button></div></div>
-    <div className="episode-grid">{detail.episodes.map((e:Episode)=><button key={e.index} className={episode===e.index?'selected':''} aria-label={`播放第${e.index}集`} aria-current={episode===e.index?'true':undefined} onClick={()=>selectEpisode(e.index)}>{e.index}{episode===e.index&&<span className="playing-bars">▥</span>}</button>)}</div><p className="player-description">{detail.series.intro}</p>
+    <EpisodeGrid episodes={detail.episodes} episode={episode} onSelect={selectEpisode}/><p className="player-description">{detail.series.intro}</p>
   </div>;
 }
+const EpisodeGrid=memo(function EpisodeGrid({episodes,episode,onSelect}:{episodes:Episode[];episode:number;onSelect:(episode:number)=>void|Promise<void>}){
+  return <div className="episode-grid">{episodes.map(e=><button key={e.index} className={episode===e.index?'selected':''} aria-label={`播放第${e.index}集`} aria-current={episode===e.index?'true':undefined} onClick={()=>void onSelect(e.index)}>{e.index}{episode===e.index&&<span className="playing-bars">▥</span>}</button>)}</div>;
+});
 function Comments({seriesId,episode,onClose}:{seriesId:string;episode:number;onClose:()=>void}){
   const [page,setPage]=useState<CommentsPage>({items:[],total:0,cursor:0,hasMore:false}),[busy,setBusy]=useState(true),[error,setError]=useState('');const generation=useRef(0);
   const load=useCallback(async(cursor=0)=>{const gen=generation.current;setBusy(true);setError('');try{const d=await window.hongguo.request<CommentsPage>(`/catalog/comments?seriesId=${seriesId}&episode=${episode}&cursor=${cursor}`);if(generation.current!==gen)return;setPage(p=>({...d,items:cursor?[...p.items,...d.items.filter(i=>!p.items.some(x=>x.id===i.id))]:d.items}));}catch(e){if(generation.current===gen)setError((e as Error).message);}finally{if(generation.current===gen)setBusy(false);}},[seriesId,episode]);
