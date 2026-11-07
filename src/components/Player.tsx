@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Play, Pause, SkipForward, Volume2, VolumeX, Maximize, Minimize, MessageSquare, RotateCcw, ChevronLeft, ChevronRight, X, Heart, Monitor, SlidersHorizontal } from 'lucide-react';
+import { ArrowLeft, Play, Pause, SkipForward, Volume2, VolumeX, Maximize, Minimize, MessageSquare, RotateCcw, ChevronLeft, ChevronRight, X, Heart, Monitor, SlidersHorizontal, LoaderCircle } from 'lucide-react';
 import type { CommentsPage, Episode, MediaSession, SeriesDetail, Settings } from '../../shared/contracts';
 import { SeamlessSwitcher, type PlaybackTarget } from '../playback/SeamlessSwitcher';
 import { HlsDeckLoader, type VideoDeck } from '../playback/HlsDeck';
@@ -24,6 +24,8 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, se
   const theaterScroll=useRef(0),theaterRef=useRef(false);
   const danmakuPanelRef = useRef(false);
   const pendingDanmaku = useRef<DanmakuPreferences | null>(null);
+  const favoritePending=useRef(false);
+  const [favoriteBusy,setFavoriteBusy]=useState(false);
   const [active, setActive] = useState(0), [episode, setEpisode] = useState(initialEpisode), [pendingEpisode, setPendingEpisode] = useState<number | null>(null), [phase, setPhase] = useState('准备播放'), [error, setError] = useState('');
   const [playing, setPlaying] = useState(false), [chrome, setChrome] = useState(true), [position, setPosition] = useState(initialPosition), [duration, setDuration] = useState(0), [buffered, setBuffered] = useState(0);
   const [muted, setMuted] = useState(false), [comments, setComments] = useState(false), [theater, setTheater] = useState(false), [favorite, setFavorite] = useState(false), [notice, setNotice] = useState(''), [fullscreen, setFullscreen] = useState(false);
@@ -48,6 +50,21 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, se
   const updateDanmaku = useCallback((patch: Partial<DanmakuPreferences>) => { const next = danmakuPreferences({ ...(pendingDanmaku.current ?? danmakuPreferences(latest.current.settings.danmaku)), ...patch }); pendingDanmaku.current = next; setDanmakuSettings(next); latest.current.onSettings({ danmaku: next }); hide(); }, [hide]);
   const closeDanmakuPanel = useCallback(() => { danmakuPanelRef.current = false; setDanmakuPanel(false); hide(); }, [hide]);
   const toggleDanmakuPanel = useCallback(() => { danmakuPanelRef.current = !danmakuPanelRef.current; setDanmakuPanel(danmakuPanelRef.current); hide(); }, [hide]);
+  useEffect(()=>window.hongguo.onLibrary(lib=>setFavorite(lib.favorites.some(series=>series.id===detail.series.id))),[detail.series.id,accountKey]);
+  useEffect(()=>{
+    if(!notice||favoriteBusy)return;
+    const duration=notice==='已加入收藏'||notice==='已取消收藏'?3000:6000;
+    const timer=setTimeout(()=>setNotice(current=>current===notice?'':current),duration);
+    return()=>clearTimeout(timer);
+  },[notice,favoriteBusy]);
+  const changeFavorite=async()=>{
+    if(favoritePending.current)return;
+    favoritePending.current=true;setFavoriteBusy(true);setNotice('正在确认并同步收藏…');
+    const desired=!favorite;
+    try{const lib=await window.hongguo.toggleFavorite(detail.series,desired);if(!mounted.current)return;setFavorite(lib.favorites.some(series=>series.id===detail.series.id));onLibrary();setNotice(desired?'已加入收藏':'已取消收藏');}
+    catch(error){if(mounted.current)setNotice((error as Error).message.replace(/^Error invoking remote method '[^']+': Error: /,''));}
+    finally{favoritePending.current=false;if(mounted.current)setFavoriteBusy(false);}
+  };
   const toggleTheater=useCallback(()=>{const scroll=playbackLayout.current?.closest('.content-scroll') as HTMLElement|null;const next=!theaterRef.current;if(next)theaterScroll.current=scroll?.scrollTop||0;theaterRef.current=next;setTheater(next);requestAnimationFrame(()=>{if(scroll)scroll.scrollTop=next?0:theaterScroll.current;});hide();},[hide]);
   const applySound = (deck: VideoDeck) => { const s = latest.current.settings; deck.video.playbackRate = s.rate; deck.video.volume = s.volume; deck.video.muted = mutedRef.current; };
   const target = (index: number, start = 0): PlaybackTarget => ({ seriesId: latest.current.detail.series.id, episode: index, quality: latest.current.settings.quality, start,
@@ -95,7 +112,7 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, se
       afterPresent: nextPaint,
     });
     switcher.current = controller; void selectEpisode(initialEpisode, false, initialPosition);
-    void window.hongguo.getLibrary().then(lib => { if (mounted.current) setFavorite(lib.favorites.some(series => series.id === detail.series.id)); });
+    void window.hongguo.getLibrary().then(lib => { if (mounted.current&&!favoritePending.current) setFavorite(lib.favorites.some(series => series.id === detail.series.id)); }).catch(()=>{});
     return () => { mounted.current = false; closed.current = true; clearTimeout(clickTimer.current); clearTimeout(hideTimer.current); void saveDeck(controller.current); void controller.close(); for (const id of prefetch.current.values()) if (id !== 'pending') void window.hongguo.request(`/media/session/${id}`, { method: 'DELETE' }).catch(() => {}); prefetch.current.clear(); };
   }, [detail.series.id, initialEpisode, initialPosition, hide, selectEpisode, saveDeck]);
   useEffect(() => {
@@ -159,7 +176,7 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, se
     setPosition(element.currentTime); setDuration(full); if (element.buffered.length) setBuffered(element.buffered.end(element.buffered.length - 1)); if (Date.now() - lastSaved.current > 10000) { lastSaved.current = Date.now(); void saveDeck(deck); } };
   const ended = (index: number) => { const deck = current(); if (!deck || deck.index !== index) return; void saveDeck(deck); if (latest.current.settings.autoplay && latest.current.detail.episodes.some(item => item.index === deck.target.episode + 1)) void selectEpisode(deck.target.episode + 1, true); else { shouldPlay.current = false; setPlaying(false); setChrome(true); setPhase('本集播放完毕'); } };
   return <div className={`player-page ${theater?'player-theater':''}`}>
-    <div className="player-heading"><button className="btn" onClick={close}><ArrowLeft size={17}/> 返回</button><div><h2>{detail.series.title}</h2><span>第 {episode} 集 · 共 {detail.episodes.length} 集</span>{pendingEpisode&&<small className="switch-status">{pendingPosition!==null?`正在定位到 ${time(pendingPosition)}`:`正在准备第 ${pendingEpisode} 集，保留当前画面`}</small>}</div><button className={`icon-button ${favorite?'active':''}`} title={favorite?'取消收藏':'收藏'} onClick={()=>void window.hongguo.toggleFavorite(detail.series).then(lib=>{setFavorite(lib.favorites.some(s=>s.id===detail.series.id));onLibrary();}).catch(e=>setNotice(e.message))}><Heart size={20} fill={favorite?'currentColor':'none'}/></button></div>
+    <div className="player-heading"><button className="btn" onClick={close}><ArrowLeft size={17}/> 返回</button><div><h2>{detail.series.title}</h2><span>第 {episode} 集 · 共 {detail.episodes.length} 集</span>{pendingEpisode&&<small className="switch-status">{pendingPosition!==null?`正在定位到 ${time(pendingPosition)}`:`正在准备第 ${pendingEpisode} 集，保留当前画面`}</small>}</div><button className={`icon-button player-favorite ${favorite?'active':''}`} title={favoriteBusy?'正在同步收藏':favorite?'取消收藏':'收藏'} aria-label={favoriteBusy?'正在同步收藏':favorite?'取消收藏':'收藏'} aria-pressed={favorite} disabled={favoriteBusy} onClick={()=>void changeFavorite()}>{favoriteBusy?<LoaderCircle className="spin" size={20}/>:<Heart size={20} fill={favorite?'currentColor':'none'}/>}</button></div>
     <div className="playback-layout" ref={playbackLayout}><div className={`video-stage ${chrome?'':'controls-hidden'}`} onMouseMove={hide} onMouseLeave={()=>{if(playing&&!danmakuPanelRef.current)setChrome(false);}}>
       <div className="fullscreen-toolbar"><div><strong>{detail.series.title}</strong><span>第 {episode} 集</span></div><button className="icon-button" title="退出全屏（Esc）" onClick={()=>void toggleFullscreen()}><Minimize size={20}/></button></div>
       {[0,1].map(index=><video key={index} ref={element=>{videos.current[index]=element;}} className="decoder-video" data-active={active===index?'true':'false'} data-episode={active===index?episode:undefined} playsInline
@@ -167,6 +184,7 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, se
         onTimeUpdate={()=>onTime(index)} onDurationChange={()=>onTime(index)} onProgress={()=>onTime(index)} onPlaying={()=>{if(current()?.index!==index)return;setPlaying(true);setPhase('');if(automaticSwitch.current){automaticSwitch.current=false;setChrome(false);}else hide();}}
       onPause={()=>{const deck=current();if(deck?.index!==index)return;setPlaying(false);const naturallyEnding=latest.current.settings.autoplay&&deck.video.ended;if(!naturallyEnding&&!automaticSwitch.current&&!requested.current){setChrome(true);void saveDeck(deck);}}} onWaiting={()=>{if(current()?.index===index&&!requested.current)setPhase('缓冲中');}} onEnded={()=>ended(index)}/>)}
       {episodeMeta && <Danmaku seriesId={detail.series.id} episode={episode} vid={episodeMeta.vid} accountKey={accountKey} getVideo={activeVideo} initialTime={episode === initialEpisode ? initialPosition : 0} metadataDuration={duration || episodeMeta.duration || 0} preferences={danmakuSettings} refreshToken={danmakuRefresh} onStatus={setDanmakuStatus}/>}
+      {notice&&<div className="player-notice player-feedback" role="status">{favoriteBusy&&<LoaderCircle className="spin" size={17}/>}<span>{notice}</span><button aria-label="关闭播放提示" onClick={()=>setNotice('')}><X size={15}/></button></div>}
       {phase&&!error&&!current()&&<div className="player-status"><div className={playing?'':'spinner'}/><span>{phase}</span>{phase==='点击开始播放'&&<button className="btn primary" onClick={toggle}><Play size={18}/>播放</button>}</div>}
       {error&&<div className={`player-error ${current()?"switch-error":""}`}><RotateCcw size={28}/><h3>暂时无法播放</h3><p>{error}</p><button className="btn primary" onClick={()=>{const wanted=requested.current??current()?.target??target(initialEpisode,initialPosition);void selectEpisode(wanted.episode,false,wanted.start,false,true);}}>重试当前集</button></div>}
       <div className="player-controls" onClick={e=>{const target=e.target as HTMLElement;if(target.closest('button'))target.closest('button')?.blur();hide();}}>
@@ -186,7 +204,7 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, se
           <button className="icon-button" title={fullscreen?'退出全屏（F）':'全屏（F）'} aria-pressed={fullscreen} onClick={()=>void toggleFullscreen()}>{fullscreen?<Minimize size={20}/>:<Maximize size={20}/>}</button>
         </div>
       </div></div>{comments&&<Comments seriesId={detail.series.id} episode={episode} onClose={()=>setComments(false)}/>}</div>
-    {notice&&<div className="player-notice" role="status">{notice}<button onClick={()=>setNotice('')}><X size={15}/></button></div>}
+
     <div className="episode-heading"><div><h3>选集</h3><span>{episodeMeta?.title||`第 ${episode} 集`}</span></div><div className="episode-actions"><label className="autoplay-switch"><input type="checkbox" checked={settings.autoplay} onChange={e=>onSettings({autoplay:e.target.checked})}/> 自动连播</label><button className="icon-button" aria-label="上一集" disabled={nextEpisode()<=1} onClick={()=>selectEpisode(nextEpisode()-1)}><ChevronLeft size={20}/></button><button className="icon-button" aria-label="下一集" disabled={nextEpisode()>=detail.episodes.length} onClick={()=>selectEpisode(nextEpisode()+1)}><ChevronRight size={20}/></button></div></div>
     <div className="episode-grid">{detail.episodes.map((e:Episode)=><button key={e.index} className={episode===e.index?'selected':''} aria-label={`播放第${e.index}集`} aria-current={episode===e.index?'true':undefined} onClick={()=>selectEpisode(e.index)}>{e.index}{episode===e.index&&<span className="playing-bars">▥</span>}</button>)}</div><p className="player-description">{detail.series.intro}</p>
   </div>;

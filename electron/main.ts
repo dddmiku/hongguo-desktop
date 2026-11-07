@@ -12,6 +12,8 @@ app.setName('红果桌面');
 if(process.env.HG_TEST_DATA_DIR)app.setPath('userData',process.env.HG_TEST_DATA_DIR);
 let window:BrowserWindow, tray:Tray, store:Store, supervisor:Supervisor, quitting=false,currentUid='local';
 let syncing:Promise<{library:Library;warnings:string[]}>|undefined;
+const favoriteWrites=new Map<string,Promise<Library>>();
+const favoriteRevisions=new Map<string,number>();
 type RemoteHistoryPage={items:HistoryItem[];hasMore:boolean;nextCursor:string|null;complete:boolean;total:number;warning?:string};
 let historyContinuation:{uid:string;cursor:string;failures:number}|null=null,historyTimer:ReturnType<typeof setTimeout>|undefined;
 const emitLibrary=()=>{if(window&&!window.isDestroyed())window.webContents.send('library:changed',store.library(currentUid));};
@@ -50,13 +52,14 @@ async function syncLibrary(){
     await refreshIdentity(); const uid=currentUid,warnings:string[]=[];
     if(uid==='local')return {library:store.library(uid),warnings};
     clearTimeout(historyTimer);historyContinuation=null;
+    const favoriteRevision=favoriteRevisions.get(uid)||0;
     const [h,f]=await Promise.allSettled([supervisor.request<RemoteHistoryPage>('/account/history?limit=100&refresh=true'),supervisor.request<{items:Series[]}>('/account/favorites')]);
     if(currentUid!==uid)return {library:store.library(currentUid),warnings:['账号已切换，已丢弃上次同步结果']};
     if(h.status==='rejected')warnings.push('云端历史暂时不可用，已保留本机记录');
     if(f.status==='rejected')warnings.push('云端收藏暂时不可用，已保留本机收藏');
     if(h.status==='fulfilled'&&h.value.warning)warnings.push(h.value.warning);
     if(h.status==='fulfilled'&&h.value.hasMore&&h.value.nextCursor){historyContinuation={uid,cursor:h.value.nextCursor,failures:0};historyTimer=setTimeout(continueHistory,5000);warnings.push('最近记录已同步，较早记录正在后台补齐');}
-    const library=await store.merge(uid,h.status==='fulfilled'?h.value.items.map(i=>({...i,uid})):[],f.status==='fulfilled'?f.value.items:null);
+    const library=await store.merge(uid,h.status==='fulfilled'?h.value.items.map(i=>({...i,uid})):[],f.status==='fulfilled'&&(favoriteRevisions.get(uid)||0)===favoriteRevision?f.value.items:null);
     return currentUid===uid?{library,warnings}:{library:store.library(currentUid),warnings:['账号已切换，已保留当前账号记录']};
   })();
   try{return await syncing;}finally{syncing=undefined;}
@@ -108,7 +111,19 @@ async function boot(){
   handle('settings:get',()=>store.settings());handle('settings:save',async(value:Partial<Settings>)=>{const old=store.settings();const settings=await store.saveSettings(value);if(value.bossKey!==undefined&&value.bossKey!==old.bossKey){try{setBossKey(settings);}catch(e){await store.saveSettings({bossKey:old.bossKey});try{setBossKey(old);}catch{}throw e;}}nativeTheme.themeSource=settings.theme;if(value.cacheGB!==undefined)await supervisor.request('/media/cache/settings',{method:'POST',body:{cacheGB:settings.cacheGB}}).catch(()=>{});return settings;});
   handle('library:get',()=>store.library(currentUid));handle('library:progress',async(value:PlaybackProgress)=>{const uid=currentUid;const item=await store.progress(uid,value);if(uid!=='local'){liveWrites.set(uid+':'+value.series.id,item.watchedAt);void pump();}});
   handle('history:query',(query:HistoryQuery={})=>store.historyPage(currentUid,query));
-  handle('library:favorite',async(series:Series)=>{const uid=currentUid;const favorite=await store.favorite(uid,series);if(uid!=='local'){try{await supervisor.request('/account/favorite',{method:'POST',body:{seriesId:series.id,favorite,expectedUid:uid}});}catch{await store.favorite(uid,series);throw new Error('收藏同步失败，已恢复原状态，请重试');}}return store.library(currentUid);});
+  handle('library:favorite',async(series:Series,desired?:boolean)=>{
+    if(!series||typeof series.id!=='string'||!/^\d{8,24}$/.test(series.id)||desired!==undefined&&typeof desired!=='boolean')throw new Error('收藏参数不正确');
+    const uid=currentUid,key=uid+':'+series.id;
+    if(favoriteWrites.has(key))return favoriteWrites.get(key);
+    favoriteRevisions.set(uid,(favoriteRevisions.get(uid)||0)+1);
+    const action=(async()=>{
+      const favorite=typeof desired==='boolean'?desired:!store.library(uid).favorites.some(item=>item.id===series.id);
+      if(uid!=='local')await supervisor.request('/account/favorite',{method:'POST',body:{seriesId:series.id,favorite,expectedUid:uid}});
+      if(currentUid!==uid)throw new Error('账号已切换，请在当前账号重新操作');
+      await store.favorite(uid,series,favorite);emitLibrary();return store.library(uid);
+    })();favoriteWrites.set(key,action);
+    try{return await action;}finally{favoriteRevisions.set(uid,(favoriteRevisions.get(uid)||0)+1);if(favoriteWrites.get(key)===action)favoriteWrites.delete(key);}
+  });
   handle('library:remove',(id:string)=>store.remove(currentUid,id));handle('library:sync',syncLibrary);
   handle('window:action',(action:string)=>{if(action==='minimize')window.minimize();else if(action==='maximize')window.isMaximized()?window.unmaximize():window.maximize();else if(action==='close')window.close();else if(action==='quit')app.quit();else if(action==='fullscreen')window.setFullScreen(!window.isFullScreen());else if(action==='exitfullscreen'){const fullscreen=window.isFullScreen();if(fullscreen)window.setFullScreen(false);return fullscreen;}});
   handle('external:open',async(url:string)=>{const u=new URL(url);if(u.protocol!=='https:'||!['github.com','gh-proxy.com'].includes(u.hostname))throw new Error('不支持的链接');await shell.openExternal(url);});

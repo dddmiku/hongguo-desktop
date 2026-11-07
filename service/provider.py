@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 import requests
 import danmaku as danmaku_contract
+from favorite_sync import set_favorite as reconcile_favorite
 from progress_contract import build_playback_progress_item, build_progress_item, epoch_seconds, mobile_position_seconds
 
 
@@ -984,9 +985,22 @@ class Provider:
         sid = identifier(series_id)
         with self._write_lock:
             self._expect_uid(expected_uid)
-            result = self._read("同步收藏", lambda: self.account.set_favorite(sid, bool(favorite)))
-            if not result.get("ok"):
-                raise ProviderError("FAVORITE_FAILED", "收藏暂时无法同步，请稍后重试")
+            def read():
+                self._expect_uid(expected_uid)
+                result = self.account.remote_favorites()
+                self._expect_uid(expected_uid)
+                return result
+            def write(sid, value):
+                self._expect_uid(expected_uid)
+                result = self.account.set_favorite(sid, value)
+                self._expect_uid(expected_uid)
+                return result
+            def reconcile():
+                try:
+                    return reconcile_favorite(sid, bool(favorite), read, write)
+                except ValueError as error:
+                    raise ProviderError("FAVORITE_FAILED", str(error)) from None
+            result = self._read("同步收藏", reconcile)
             self.cache.clear()
         return {"synced": True, "favorite": bool(favorite)}
 

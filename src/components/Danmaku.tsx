@@ -17,7 +17,7 @@ export default function Danmaku(props: Props) {
     const source = new DanmakuFeed({ seriesId: props.seriesId, episode: props.episode, vid: props.vid },
       (route, options) => window.hongguo.request(route, options), page => engine.merge(page.items), value => latest.current.onStatus(value));
     feed.current = source;
-    if (props.preferences.enabled) source.ensure(props.getVideo()?.currentTime ?? props.initialTime, props.metadataDuration);
+    if (props.preferences.enabled) source.preload(props.getVideo()?.currentTime ?? props.initialTime, props.metadataDuration, props.getVideo()?.playbackRate || 1);
     let frame = 0, width = 0, height = 0, ratio = 1, lastCheck = -Infinity, lastFrame = -Infinity, label = '', lastDraw = '', enabled = props.preferences.enabled;
     const resize = () => { const bounds = surface.getBoundingClientRect(); width = bounds.width; height = bounds.height; ratio = Math.min(2, devicePixelRatio || 1); surface.width = Math.round(width * ratio); surface.height = Math.round(height * ratio); lastDraw = ''; };
     const observer = new ResizeObserver(resize); observer.observe(surface); resize();
@@ -28,8 +28,7 @@ export default function Danmaku(props: Props) {
         if (enabled !== prefs.enabled) { engine.seek(video.currentTime); enabled = prefs.enabled; }
         if (prefs.enabled && now - lastCheck > 750) {
           const duration = current.metadataDuration || 0;
-          source.ensure(video.currentTime, duration);
-          if (video.currentTime % 30 >= 20 && (!duration || video.currentTime + 10 < duration)) source.ensure((Math.floor(video.currentTime / 30) + 1) * 30, duration);
+          source.preload(video.currentTime, duration, video.playbackRate);
           lastCheck = now;
         }
         const shown = engine.step({ time: video.currentTime, now, running: !video.paused && !video.ended && video.readyState >= 3 && !document.hidden,

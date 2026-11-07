@@ -19,3 +19,5 @@
 .player-theater>.episode-grid{max-height:200px}
 .player-theater .playback-layout:not(:fullscreen) .player-controls{padding-left:30px;padding-right:30px}
 @media(max-width:1040px){.player-theater .player-heading{padding-left:23px;padding-right:23px}.player-theater .episode-heading,.player-theater>.episode-grid,.player-theater>.player-description{margin-left:23px;margin-right:23px}}
+
+.player-feedback{position:absolute;top:22px;right:22px;z-index:5;max-width:min(540px,calc(100% - 44px));margin:0;gap:12px;background:#18202deb;color:#fff;border:1px solid #ffffff32;box-shadow:0 8px 28px #0004;line-height:1.6}.player-feedback span{min-width:0}.player-favorite:disabled{opacity:.75;cursor:progress}

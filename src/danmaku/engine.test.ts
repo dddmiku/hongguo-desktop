@@ -62,4 +62,18 @@ describe('真实媒体时间驱动的弹幕', () => {
     expect(danmakuPreferences({ opacity: NaN, blockedWords: [' ', '测试', '测试'] }).blockedWords).toEqual(['测试']);
     expect(danmakuPreferences({ opacity: .01 }).opacity).toBe(.25);
   });
+  it('同一时间点的一批弹幕连续排队出现，不因每帧预算直接丢失', () => {
+    const e = engine(); e.merge(Array.from({ length: 12 }, (_, id) => item(id, 1, '短弹幕' + id)));
+    const seen = new Set<string>(), born: number[] = [];
+    for (let n = 0; n < 300; n++) {
+      for (const shown of e.step(frame(n / 60, n * 1000 / 60))) if (!seen.has(shown.id)) { seen.add(shown.id); born.push(n / 60); }
+    }
+    expect(seen.size).toBe(12); expect(born.at(-1)! - born[0]).toBeGreaterThan(2);
+    expect(born.every((at, i) => !i || at - born[i - 1] >= .19)).toBe(true);
+  });
+  it('合并下一时间段保留正在滚动的弹幕，不清空整个画面', () => {
+    const e = engine(); e.merge([item(1, 29)]); e.step(frame(29, 0));
+    e.merge([item(2, 30)]); const next = e.step(frame(30, 1000));
+    expect(next.map(item => item.id)).toEqual(['12345679', '12345680']);
+  });
 });

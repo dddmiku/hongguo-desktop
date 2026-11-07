@@ -5,6 +5,13 @@ const scope = { seriesId: '12345678', episode: 1, vid: '23456789' };
 const page: DanmakuPage = { ...scope, source: 'mobile', start: 0, end: 30, hasMore: true, items: [{ id: '34567890', text: '测试弹幕', time: 3 }] };
 const flush = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 describe('弹幕异步时间段读取', () => {
+  it('第一段播放前预取下一段，倍速增大预取距离', () => {
+    const request = vi.fn(() => new Promise<DanmakuPage>(() => {}));
+    const feed = new DanmakuFeed(scope, request as NativeBridge['request'], vi.fn(), vi.fn());
+    feed.preload(0, 120, 1); expect(request.mock.calls.length).toBe(2);
+    feed.preload(1, 120, 3); expect(request.mock.calls.length).toBe(3);
+    feed.close();
+  });
   it('同时间段只请求一次，延迟返回和关闭后的回复不能污染新播放器', async () => {
     let reply!: (value: DanmakuPage) => void;
     const request = vi.fn(() => new Promise<DanmakuPage>(resolve => { reply = resolve; }));

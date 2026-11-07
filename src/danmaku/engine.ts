@@ -17,6 +17,8 @@ export class DanmakuEngine {
   private rows: DanmakuItem[] = [];
   private consumed = new Set<string>();
   private flights: Flight[] = [];
+  private waiting: DanmakuItem[] = [];
+  private nextAdmission = 0;
   private cursor = 0;
   private clock = 0;
   private previousTime: number | undefined;
@@ -30,12 +32,12 @@ export class DanmakuEngine {
     for (const item of items) if (item && /^\d{8,24}$/.test(item.id) && typeof item.text === 'string' && item.text.trim() && Number.isFinite(item.time) && item.time >= 0 && item.time <= 86400) this.data.set(item.id, { ...item, text: item.text.slice(0, 160) });
     this.rows = [...this.data.values()].sort((a, b) => a.time - b.time || a.id.localeCompare(b.id));
     if (this.rows.length > 3000) { this.rows = this.rows.slice(-3000); this.data = new Map(this.rows.map(item => [item.id, item])); }
-    this.cursor = lowerBound(this.rows, (this.previousTime ?? 0) - .5);
+    this.cursor = lowerBound(this.rows, (this.previousTime ?? 0) - 3);
   }
   seek(time: number) {
-    this.flights = []; this.consumed.clear(); this.cursor = lowerBound(this.rows, time - .15); this.previousTime = time;
+    this.flights = []; this.waiting = []; this.nextAdmission = this.clock; this.consumed.clear(); this.cursor = lowerBound(this.rows, time - .15); this.previousTime = time;
   }
-  clear() { this.data.clear(); this.rows = []; this.consumed.clear(); this.flights = []; this.cursor = 0; this.previousTime = undefined; this.previousNow = undefined; }
+  clear() { this.data.clear(); this.rows = []; this.consumed.clear(); this.flights = []; this.waiting = []; this.nextAdmission = 0; this.cursor = 0; this.clock = 0; this.previousLayout = ''; this.previousTime = undefined; this.previousNow = undefined; this.lastDisplayedTime = undefined; }
   step(frame: Step): DanmakuFrame[] {
     const { time, now, running, seeking, rate, width, height, preferences: prefs } = frame;
     if (!Number.isFinite(time) || width < 1 || height < 1) return [];
@@ -51,18 +53,22 @@ export class DanmakuEngine {
     const lanes = Math.max(1, Math.min(prefs.density === 'sparse' ? 4 : 10, Math.floor((Math.min(height - 85, height * prefs.area) - top) / lineHeight)));
     const layout = `${Math.round(width)}:${fontSize}:${lanes}`;
     if (layout !== this.previousLayout) { this.flights = []; this.previousLayout = layout; }
-    if (!prefs.enabled) { this.flights = []; this.cursor = lowerBound(this.rows, time); return []; }
+    if (!prefs.enabled) { this.flights = []; this.waiting = []; this.cursor = lowerBound(this.rows, time); return []; }
     const x = (flight: Flight) => width - (this.clock - flight.born) * flight.speed;
     this.flights = this.flights.filter(flight => flight.lane < lanes && x(flight) + flight.width > -20 && !prefs.blockedWords.some(word => flight.item.text.includes(word)));
     if (running && !seeking) {
-      let admitted = 0;
-      const budget = prefs.density === 'sparse' ? 1 : prefs.density === 'dense' ? 4 : 2;
       const capacity = prefs.density === 'sparse' ? 12 : prefs.density === 'dense' ? 50 : 30;
       while (this.cursor < this.rows.length && this.rows[this.cursor].time <= time) {
         const item = this.rows[this.cursor++];
         if (this.consumed.has(item.id)) continue;
         this.consumed.add(item.id);
-        if (item.time < time - .75 || admitted >= budget || this.flights.length >= capacity || prefs.blockedWords.some(word => item.text.includes(word))) continue;
+        if (item.time < time - 3 || prefs.blockedWords.some(word => item.text.includes(word))) continue;
+        this.waiting.push(item);
+      }
+      this.waiting = this.waiting.filter(item => item.time >= time - 8 && !prefs.blockedWords.some(word => item.text.includes(word))).slice(0, 120);
+      const interval = prefs.density === 'sparse' ? .45 : prefs.density === 'dense' ? .1 : .2;
+      if (this.waiting.length && this.clock >= this.nextAdmission && this.flights.length < capacity) {
+        const item = this.waiting[0];
         const text = truncateDanmaku(item.text);
         const itemWidth = this.measure(text, fontSize), speed = Math.max(70, width / 9);
         let lane = -1;
@@ -70,8 +76,11 @@ export class DanmakuEngine {
           const last = this.flights.filter(flight => flight.lane === candidate).at(-1);
           if (!last || x(last) + last.width + 28 < width) { lane = candidate; break; }
         }
-        if (lane < 0) continue;
-        this.flights.push({ item, text, width: itemWidth, lane, born: this.clock, speed }); admitted++;
+        if (lane >= 0) {
+          this.waiting.shift();
+          this.flights.push({ item, text, width: itemWidth, lane, born: this.clock, speed });
+          this.nextAdmission = this.clock + interval;
+        }
       }
     }
     return this.flights.map(flight => ({ id: flight.item.id, text: flight.text, x: x(flight), y: top + (flight.lane + 1) * lineHeight, width: flight.width, fontSize, lane: flight.lane }));

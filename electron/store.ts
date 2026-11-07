@@ -101,11 +101,12 @@ export class Store {
     await this.persist();
     return item;
   }
-  async favorite(uid:string,series:Series) {
+  async favorite(uid:string,series:Series,desired?:boolean) {
     if (!/^\d+$/.test(series.id)) throw new Error('无效的剧集');
     const lib = this.current(uid), existing = lib.favorites.some(s=>s.id===series.id);
-    lib.favorites = existing ? lib.favorites.filter(s=>s.id!==series.id) : [series,...lib.favorites].slice(0,1000);
-    await this.persist(); return !existing;
+    const enabled=typeof desired==='boolean'?desired:!existing;
+    lib.favorites = !enabled ? lib.favorites.filter(s=>s.id!==series.id) : existing?lib.favorites:[series,...lib.favorites].slice(0,1000);
+    await this.persist(); return enabled;
   }
   async remove(uid:string,id:string) { this.history.remove(uid,id);delete this.data.outbox[uid+':'+id]; await this.persist(); return this.library(uid); }
   async merge(uid:string,history:HistoryItem[],favorites:Series[]|null) {

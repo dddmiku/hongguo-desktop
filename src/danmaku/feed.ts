@@ -14,6 +14,15 @@ export class DanmakuFeed {
               private request: NativeBridge['request'], private receive: (page: DanmakuPage) => void,
               private status: (value: DanmakuStatus) => void) {}
   private report() { if (!this.closed) this.status({ loading: this.pending.size > 0, loaded: this.ids.size, error: this.error }); }
+  preload(position: number, duration: number, rate = 1) {
+    if (!Number.isFinite(position) || position < 0) return;
+    const start = Math.floor(position / 30) * 30;
+    const horizon = Math.min(90, Math.max(30, 25 * Math.max(1, rate)));
+    for (let at = start; at <= position + horizon; at += 30) {
+      if (duration > 0 && at >= duration) break;
+      this.ensure(at, duration);
+    }
+  }
   ensure(position: number, duration: number, refresh = false) {
     if (this.closed || !Number.isFinite(position) || position < 0) return;
     const bucket = Math.floor(position / 30);
