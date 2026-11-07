@@ -10,6 +10,13 @@ const lowerBound = (rows: DanmakuItem[], time: number) => {
   while (lo < hi) { const mid = (lo + hi) >>> 1; if (rows[mid].time < time) lo = mid + 1; else hi = mid; }
   return lo;
 };
+const laneScore=(id:string,lane:number)=>{
+  let value=2166136261;
+  for(const char of id+':'+lane)value=Math.imul(value^char.charCodeAt(0),16777619);
+  value=Math.imul(value^(value>>>16),0x7feb352d);
+  value=Math.imul(value^(value>>>15),0x846ca68b);
+  return (value^(value>>>16))>>>0;
+};
 
 /** Media time admits comments; a pausable clock keeps their text readable at any playback rate. */
 export class DanmakuEngine {
@@ -17,8 +24,8 @@ export class DanmakuEngine {
   private rows: DanmakuItem[] = [];
   private consumed = new Set<string>();
   private flights: Flight[] = [];
-  private waiting: DanmakuItem[] = [];
-  private nextAdmission = 0;
+  private allowance:number|undefined;
+  private allowanceClock=0;
   private cursor = 0;
   private clock = 0;
   private previousTime: number | undefined;
@@ -32,12 +39,12 @@ export class DanmakuEngine {
     for (const item of items) if (item && /^\d{8,24}$/.test(item.id) && typeof item.text === 'string' && item.text.trim() && Number.isFinite(item.time) && item.time >= 0 && item.time <= 86400) this.data.set(item.id, { ...item, text: item.text.slice(0, 160) });
     this.rows = [...this.data.values()].sort((a, b) => a.time - b.time || a.id.localeCompare(b.id));
     if (this.rows.length > 3000) { this.rows = this.rows.slice(-3000); this.data = new Map(this.rows.map(item => [item.id, item])); }
-    this.cursor = lowerBound(this.rows, (this.previousTime ?? 0) - 3);
+    this.cursor = lowerBound(this.rows, (this.previousTime ?? 0) - .5);
   }
   seek(time: number) {
-    this.flights = []; this.waiting = []; this.nextAdmission = this.clock; this.consumed.clear(); this.cursor = lowerBound(this.rows, time - .15); this.previousTime = time;
+    this.flights = []; this.allowance=undefined;this.allowanceClock=this.clock;this.consumed.clear(); this.cursor = lowerBound(this.rows, time - .15); this.previousTime = time;
   }
-  clear() { this.data.clear(); this.rows = []; this.consumed.clear(); this.flights = []; this.waiting = []; this.nextAdmission = 0; this.cursor = 0; this.clock = 0; this.previousLayout = ''; this.previousTime = undefined; this.previousNow = undefined; this.lastDisplayedTime = undefined; }
+  clear() { this.data.clear(); this.rows = []; this.consumed.clear(); this.flights = []; this.allowance=undefined;this.allowanceClock=0;this.cursor = 0; this.clock = 0; this.previousLayout = ''; this.previousTime = undefined; this.previousNow = undefined; this.previousRunning=false;this.lastDisplayedTime = undefined; }
   step(frame: Step): DanmakuFrame[] {
     const { time, now, running, seeking, rate, width, height, preferences: prefs } = frame;
     if (!Number.isFinite(time) || width < 1 || height < 1) return [];
@@ -52,38 +59,36 @@ export class DanmakuEngine {
     const fontSize = prefs.fontSize * Math.max(.8, Math.min(1.4, width / 1280));
     const lineHeight = Math.ceil(fontSize * 1.5), top = Math.max(16, fontSize);
     const lanes = Math.max(1, Math.min(prefs.density === 'sparse' ? 4 : 10, Math.floor((Math.min(height - 85, height * prefs.area) - top) / lineHeight)));
-    const layout = `${Math.round(width)}:${fontSize}:${lanes}`;
-    if (layout !== this.previousLayout) { this.flights = []; this.previousLayout = layout; }
-    if (!prefs.enabled) { this.flights = []; this.waiting = []; this.cursor = lowerBound(this.rows, time); return []; }
+    const layout = `${Math.round(width)}:${fontSize}:${lanes}:${prefs.density}`;
+    if (layout !== this.previousLayout) { this.flights = []; this.allowance=undefined;this.allowanceClock=this.clock;this.previousLayout = layout; }
+    if (!prefs.enabled) { this.flights = []; this.allowance=undefined;this.cursor = lowerBound(this.rows, time); return []; }
     const x = (flight: Flight) => width - (this.clock - flight.born) * flight.speed;
     this.flights = this.flights.filter(flight => flight.lane < lanes && x(flight) + flight.width > -20 && !prefs.blockedWords.some(word => flight.item.text.includes(word)));
     if (running && !seeking) {
       const capacity = prefs.density === 'sparse' ? 12 : prefs.density === 'dense' ? 50 : 30;
+      const speed=Math.max(70,width/9),burst=Math.min(lanes,Math.max(2,Math.floor(capacity/5)));
+      const lifetime=(width+fontSize*12+28)/speed;
+      // A small burst budget samples density at the original timestamp; it never reschedules comments.
+      this.allowance=Math.min(burst,(this.allowance??burst)+Math.max(0,this.clock-this.allowanceClock)*capacity*.92/lifetime);
+      this.allowanceClock=this.clock;
       while (this.cursor < this.rows.length && this.rows[this.cursor].time <= time) {
         const item = this.rows[this.cursor++];
         if (this.consumed.has(item.id)) continue;
         this.consumed.add(item.id);
-        if (item.time < time - 3 || prefs.blockedWords.some(word => item.text.includes(word))) continue;
-        this.waiting.push(item);
-      }
-      this.waiting = this.waiting.filter(item => item.time >= time - 8 && !prefs.blockedWords.some(word => item.text.includes(word))).slice(0, 120);
-      const minimumInterval = prefs.density === 'sparse' ? .45 : prefs.density === 'dense' ? .1 : .2;
-      if (this.waiting.length && this.clock >= this.nextAdmission && this.flights.length < capacity) {
-        const item = this.waiting[0];
+        if (item.time < time - .5 || prefs.blockedWords.some(word => item.text.includes(word))||this.allowance<1||this.flights.length>=capacity) continue;
         const text = truncateDanmaku(item.text);
-        const itemWidth = this.measure(text, fontSize), speed = Math.max(70, width / 9);
-        let lane = -1, emptiest = Infinity;
+        const itemWidth = this.measure(text, fontSize),born=this.clock-(time-item.time)/Math.max(.1,rate);
+        const start=width-(this.clock-born)*speed;
+        let lane = -1, best = Infinity;
         for (let candidate = 0; candidate < lanes; candidate++) {
           const last = this.flights.filter(flight => flight.lane === candidate).at(-1);
           const tail=last?x(last)+last.width:-Infinity;
-          if ((!last || tail + 28 < width) && (lane < 0 || tail < emptiest)) { lane = candidate; emptiest=tail; }
+          const score=laneScore(item.id,candidate);
+          if ((!last || tail + 28 < start) && score < best) { lane = candidate; best=score; }
         }
         if (lane >= 0) {
-          this.waiting.shift();
-          this.flights.push({ item, text, width: itemWidth, lane, born: this.clock, speed });
-          // Admit at a steady lifetime budget: filling the entire cap in a burst creates a blank band.
-          const interval=Math.max(minimumInterval,(width+itemWidth+28)/speed/capacity*1.08);
-          this.nextAdmission = this.clock + interval;
+          this.flights.push({ item, text, width: itemWidth, lane, born, speed });
+          this.allowance--;
         }
       }
     }

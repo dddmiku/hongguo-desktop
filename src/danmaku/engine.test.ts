@@ -5,6 +5,35 @@ const item = (id: number, time: number, text = '同步手机弹幕') => ({ id: S
 const frame = (time: number, now: number, patch = {}) => ({ time, now, running: true, seeking: false, rate: 1, width: 1280, height: 720, preferences: defaultDanmaku, ...patch });
 const engine = () => new DanmakuEngine((text, size) => [...text].length * size);
 describe('真实媒体时间驱动的弹幕', () => {
+  it('同时刻的弹幕在可用轨道同帧入场，不被均匀队列改写时间',()=>{
+    const e=engine();e.merge(Array.from({length:4},(_,id)=>item(id,1,'同一剧情 '+id)));
+    expect(e.step(frame(.99,0))).toHaveLength(0);
+    const shown=e.step(frame(1.01,20));
+    expect(shown).toHaveLength(4);
+    expect(new Set(shown.map(value=>value.lane)).size).toBe(4);
+  });
+  it('密度筛选不把过量弹幕延迟几秒补到后续剧情',()=>{
+    const e=engine();e.merge(Array.from({length:40},(_,id)=>item(id,1,'同一时间 '+id)));
+    const seen=new Set<string>(),admissions:number[]=[];
+    for(let n=0;n<360;n++)for(const shown of e.step(frame(n/60,n*1000/60)))if(!seen.has(shown.id)){seen.add(shown.id);admissions.push(n/60);}
+    expect(seen.size).toBeGreaterThanOrEqual(2);
+    expect(admissions.every(at=>Math.abs(at-1)<.05)).toBe(true);
+  });
+  it('连续真实时间点的弹幕不会按轨道顺序排成固定斜梯',()=>{
+    const e=engine();e.merge(Array.from({length:30},(_,id)=>item(id,1+id,'真实剧情 '+id)));
+    const seen=new Set<string>(),lanes:number[]=[];
+    for(let n=0;n<60*40;n++)for(const shown of e.step(frame(n/60,n*1000/60)))if(!seen.has(shown.id)){seen.add(shown.id);lanes.push(shown.lane);}
+    expect(lanes.length).toBeGreaterThan(20);
+    const staircase=lanes.slice(1).filter((lane,n)=>lane===(lanes[n]+1)%10).length;
+    expect(staircase).toBeLessThan(lanes.length/2);
+  });
+  it('网络晚到的旧时间点不会被补到新场景，轻微延迟沿原时间位置出现',()=>{
+    const e=engine();e.step(frame(1,0));
+    e.merge([item(0,.1),item(1,.9)]);
+    const shown=e.step(frame(1.1,100));
+    expect(shown.map(value=>value.id)).toEqual(['12345679']);
+    expect(shown[0].x).toBeCloseTo(1280-1280/9*.2);
+  });
   it('毫秒归一后的弹幕只在对应视频时间出现', () => {
     const e = engine(); e.merge([item(0, 2.925)]);
     expect(e.step(frame(2.8, 0))).toHaveLength(0);
@@ -62,14 +91,14 @@ describe('真实媒体时间驱动的弹幕', () => {
     expect(danmakuPreferences({ opacity: NaN, blockedWords: [' ', '测试', '测试'] }).blockedWords).toEqual(['测试']);
     expect(danmakuPreferences({ opacity: .01 }).opacity).toBe(.25);
   });
-  it('同一时间点的一批弹幕连续排队出现，不因每帧预算直接丢失', () => {
+  it('密集同时间点按密度筛选，但展示的每条都属于原剧情时间', () => {
     const e = engine(); e.merge(Array.from({ length: 12 }, (_, id) => item(id, 1, '短弹幕' + id)));
     const seen = new Set<string>(), born: number[] = [];
     for (let n = 0; n < 360; n++) {
       for (const shown of e.step(frame(n / 60, n * 1000 / 60))) if (!seen.has(shown.id)) { seen.add(shown.id); born.push(n / 60); }
     }
-    expect(seen.size).toBe(12); expect(born.at(-1)! - born[0]).toBeGreaterThan(2);
-    expect(born.every((at, i) => !i || at - born[i - 1] >= .19)).toBe(true);
+    expect(seen.size).toBe(6);
+    expect(born.every(at=>Math.abs(at-1)<.05)).toBe(true);
   });
   it('合并下一时间段保留正在滚动的弹幕，不清空整个画面', () => {
     const e = engine(); e.merge([item(1, 29)]); e.step(frame(29, 0));

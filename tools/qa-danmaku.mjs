@@ -1,5 +1,5 @@
 // Genuine mobile API data and decoded video; no account, synthetic comments or public writes.
-import { _electron as electron } from '@playwright/test';
+import { _electron as electron,expect } from '@playwright/test';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 const root = process.cwd(), out = path.join(root, '_work', 'danmaku-qa'); await mkdir(out, { recursive: true });
@@ -76,7 +76,7 @@ try {
   await page.getByLabel('弹幕密度').selectOption('dense'); await page.getByLabel('弹幕字号').selectOption('26');
   await page.getByLabel('弹幕显示区域').selectOption('.25');
   const beforeOpacity = await media(); await page.getByLabel('弹幕不透明度').focus(); await page.keyboard.press('ArrowLeft');
-  await page.waitForFunction(async () => (await window.hongguo.getSettings()).danmaku.opacity < .8);
+  await expect.poll(()=>page.evaluate(async()=> (await window.hongguo.getSettings()).danmaku.opacity)).toBeLessThan(.8);
   const preferences = await page.evaluate(() => window.hongguo.getSettings());
   check('显示设置已保存且滑块方向键不跳视频', preferences.danmaku.fontSize === 26 && preferences.danmaku.area === .25 && preferences.danmaku.density === 'dense' && (await media()).time >= beforeOpacity.time, preferences.danmaku);
   await page.screenshot({ path: path.join(out, 'settings.png') });

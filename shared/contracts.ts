@@ -24,7 +24,8 @@ export interface NativeBridge {
   getLibrary(): Promise<Library>; saveProgress(value: PlaybackProgress): Promise<void>;
   getHistory(query?: HistoryQuery): Promise<HistoryPage>;
   toggleFavorite(series: Series, desired?: boolean): Promise<Library>; removeHistory(id: string): Promise<Library>;
-  syncLibrary(): Promise<{ library: Library; warnings: string[] }>;
+  syncLibrary(options?:{background?:boolean}): Promise<{ library: Library; warnings: string[] }>;
+  setOnline(online:boolean):Promise<void>;
   window(action: 'minimize' | 'maximize' | 'close' | 'quit' | 'fullscreen' | 'exitfullscreen'): Promise<void | boolean>;
   openExternal(url: string): Promise<void>; exportDiagnostics(): Promise<string>;
   checkUpdate(): Promise<UpdateInfo>; downloadUpdate(info: UpdateInfo): Promise<void>;
