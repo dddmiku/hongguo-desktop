@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("publisher_under_test", ROOT / "tools/publish.py")
@@ -98,6 +98,21 @@ class PublishTests(unittest.TestCase):
     def run_release(self, github):
         with patch.object(P, "request", side_effect=github.request):
             return P.make_release(P.REPO, [self.asset], "new notes", "fixture", version="1.1.0")
+
+    def test_transient_read_connection_failure_is_retried(self):
+        response = MagicMock(); response.__enter__.return_value = response
+        response.status = 200; response.read.return_value = b'{"ok":true}'
+        opener = MagicMock()
+        opener.open.side_effect = [P.urllib.error.URLError("TLS connection interrupted"), response]
+        with patch.object(P, "proxy", return_value=None), patch.object(P.urllib.request, "build_opener", return_value=opener), patch.object(P.time, "sleep"):
+            self.assertEqual(P.request("GET", "https://api.github.com/test"), (200, {"ok":True}))
+        self.assertEqual(opener.open.call_count, 2)
+
+    def test_interrupted_write_is_not_blindly_replayed(self):
+        opener = MagicMock(); opener.open.side_effect = P.urllib.error.URLError("TLS connection interrupted")
+        with patch.object(P, "proxy", return_value=None), patch.object(P.urllib.request, "build_opener", return_value=opener), self.assertRaises(P.urllib.error.URLError):
+            P.request("POST", "https://api.github.com/test", data={"draft":True})
+        self.assertEqual(opener.open.call_count, 1)
 
     def test_new_release_is_verified_before_publication(self):
         github = GitHub()

@@ -1,5 +1,6 @@
 """发布独立 PC 客户端。旧混合仓库已停止维护；凭据只在内存和 Git 子进程环境中。"""
 import argparse
+import base64
 import copy
 import ctypes
 from ctypes import wintypes
@@ -11,6 +12,7 @@ import socket
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +21,7 @@ REPO = OWNER + "/hongguo-desktop"
 LEGACY = OWNER + "/hongguo-desktop-releases"
 VERSION = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
 # 仅供旧 1.9.x 更新器比较与固定文件名使用，不是新客户端版本。
-LEGACY_BRIDGE_VERSION = "1.9.14"
+LEGACY_BRIDGE_VERSION = "1.9.15"
 
 
 def token():
@@ -66,18 +68,25 @@ def request(method, url, secret=None, data=None, raw=None, content_type=None):
     route = proxy()
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": route, "https": route} if route else {}))
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with opener.open(req, timeout=240 if raw is not None else 25) as response:
-            content = response.read()
-            try:
-                return response.status, json.loads(content)
-            except ValueError:
-                return response.status, content
-    except urllib.error.HTTPError as error:
+    attempts = 3 if method == "GET" else 1
+    for attempt in range(attempts):
         try:
-            return error.code, json.loads(error.read())
-        except ValueError:
-            return error.code, {}
+            with opener.open(req, timeout=240 if raw is not None else 25) as response:
+                content = response.read()
+                try:
+                    return response.status, json.loads(content)
+                except ValueError:
+                    return response.status, content
+        except urllib.error.HTTPError as error:
+            try:
+                return error.code, json.loads(error.read())
+            except ValueError:
+                return error.code, {}
+        except (OSError, TimeoutError):
+            # Retry only reads. An interrupted mutation must be inspected before replay.
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(.5 * (attempt + 1))
 
 
 def create_repo(secret):
@@ -88,6 +97,24 @@ def create_repo(secret):
     if code not in (200, 201) or repo.get("private"):
         raise RuntimeError("公开仓库创建或可见性核验失败：HTTP %s" % code)
     print("公开仓库：", repo["html_url"])
+
+
+def git_auth_env(secret):
+    """Authenticate Git directly in its child environment, without account selection or secret files."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")
+    for key in list(env):
+        if key.startswith("GIT_TRACE") or key in ("GIT_ASKPASS", "SSH_ASKPASS", "GIT_CURL_VERBOSE"):
+            env.pop(key)
+    count = int(env.get("GIT_CONFIG_COUNT", "0"))
+    header = "Authorization: Basic " + base64.b64encode(("x-access-token:" + secret).encode()).decode()
+    settings = (("credential.helper", ""), ("credential.interactive", "never"),
+                ("http.https://github.com/.extraHeader", ""),
+                ("http.https://github.com/.extraHeader", header))
+    for offset, (key, value) in enumerate(settings):
+        env["GIT_CONFIG_KEY_" + str(count + offset)] = key
+        env["GIT_CONFIG_VALUE_" + str(count + offset)] = value
+    env["GIT_CONFIG_COUNT"] = str(count + len(settings))
+    return env
 
 
 def push_source(secret):
@@ -102,7 +129,7 @@ def push_source(secret):
     changed = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=ROOT).returncode
     if changed:
         git("commit", "-m", "fix: fullscreen playback, instant catalog and seamless episode transitions")
-    env = dict(os.environ, HG_GITHUB_TOKEN=secret, GIT_ASKPASS=str(ROOT / "tools/git-askpass.cmd"), GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")
+    env = git_auth_env(secret)
     route = proxy()
     args = ["-c", "credential.helper="]
     if route:

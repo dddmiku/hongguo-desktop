@@ -44,7 +44,7 @@ jobs:
       - name: Run isolated service tests
         run: python -m unittest discover -s service/tests -v
       - name: Check draft release and migration feed contracts
-        run: python -m unittest discover -s tools -p test_publish.py -v
+        run: python -m unittest discover -s tools -p 'test_*.py' -v
       - name: Check installation process isolation
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/test-installer-process-cleanup.ps1
 
