@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const root = process.cwd(), out = path.join(root, '_work', 'installed-final-qa');
+const expectedVersion = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')).version;
 await mkdir(out, { recursive: true });
 const executable = path.join(process.env.LOCALAPPDATA, 'Programs', 'hongguo-desktop', '红果桌面.exe');
 const env = { ...process.env, TEMP: out, TMP: out, HG_TEST_DATA_DIR: path.join(root, '_work', 'installed-final-data') };
@@ -17,7 +18,7 @@ const check = (name, ok, detail) => {
 try {
   await page.waitForSelector('.app-shell', { timeout: 30000 });
   const state = await page.evaluate(async () => ({ health: await window.hongguo.request('/health'), session: await window.hongguo.request('/account/session') }));
-  check('最终安装版版本和独立测试配置', state.health.ok && state.health.signer && state.health.version === '1.1.0' && !state.session.loggedIn,
+  check('最终安装版版本和独立测试配置', state.health.ok && state.health.signer && state.health.version === expectedVersion && !state.session.loggedIn,
     { version: state.health.version, healthy: state.health.ok, signer: state.health.signer, loggedOut: !state.session.loggedIn });
   const filters = await page.evaluate(() => window.hongguo.request('/catalog/filters?genre=short_play'));
   const options = filters.filters.groups.find(group => group.type === 'category_dim_theme').items;

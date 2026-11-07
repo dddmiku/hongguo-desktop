@@ -132,6 +132,12 @@ def create_app(provider, token, media_manager=None, signer_ok=lambda: True):
     def session():
         return provider.session()
 
+    @app.get("/catalog/danmaku")
+    def danmaku(seriesId: str = Query(..., min_length=8, max_length=24), episode: int = Query(..., ge=1, le=100000),
+                position: float = Query(0, ge=0, le=86400), duration: float = Query(0, ge=0, le=86400),
+                refresh: bool = Query(False)):
+        return provider.danmaku(seriesId, episode, position, duration, refresh)
+
     @app.post("/account/send-code")
     def send_code(payload: dict = Body(...)):
         return provider.send_code(payload.get("mobile", ""))

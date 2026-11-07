@@ -1,0 +1,427 @@
+{
+  "source": "com.phoenix.read 7.4.3.32 gecko emoji",
+  "resourceVersion": 7,
+  "resourceSet": "7699076530881740809",
+  "assets": [
+    {
+      "file": "emoji_dr_4.png",
+      "sha256": "493901d2f1354d3bf323b13f11a982e9921407d310a3d031eeff0eb988b2e48f",
+      "size": 5071,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_23.png",
+      "sha256": "a37d38861d6300545681cf6e9214aac31f5af91cf1e726c7df32378eb5381507",
+      "size": 5559,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_5.png",
+      "sha256": "4a3a2646af40d190d1dbb408a6423b907cb3d0b2a5c129b86bd84d7ae9d29040",
+      "size": 5854,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_33.png",
+      "sha256": "656b5b2d91efe54a73181311b8cc4e7e9f8f1a60607be0fcddf9ce256529fa24",
+      "size": 4504,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_13.png",
+      "sha256": "d6400f2c7bfbb6317fcec6c2628d5ec2869856c648e5c101c0384adb36c3fb12",
+      "size": 5418,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_24.png",
+      "sha256": "01e8b9864348cdfda38ec5f45098eded1a66977d435f4d056435f04053f17ba4",
+      "size": 6380,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_53.png",
+      "sha256": "79302a0ff594a27809566bf289014406157c580c722ee90f55cd94720bf47498",
+      "size": 4221,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_60.png",
+      "sha256": "1655121b596b02364a8aeb46e8da9db45707dcf2021b2a736fd12713e5c995bb",
+      "size": 10313,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_40.png",
+      "sha256": "8189e665d2cb4548aff3a6901175b91266da1d0b4a4393c22a91842c33255ae4",
+      "size": 6055,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_45.png",
+      "sha256": "52b648a9cfd5e368128d40d4cb3ea353b4af3445963807e2498be04ef4adb641",
+      "size": 5579,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_52.png",
+      "sha256": "827b48c8c22f9c98e4683a87c04b79c71e8d00fe80014abf7547f591aca141e0",
+      "size": 5452,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_37.png",
+      "sha256": "83a2480c64b55f322407ef3d4a421a49cddd8ddd405998a12b46741746ba8d66",
+      "size": 5813,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_2.png",
+      "sha256": "8cf8e76f5ed05f29a8c9333d98998e4af0e903ed12e04d7cd60917356f499424",
+      "size": 5514,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_34.png",
+      "sha256": "493379cb972c5f1f94c28facfd1a48dcfc4840dfb672472a684576a5b10b00b0",
+      "size": 4624,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_38.png",
+      "sha256": "c8c73380df7d60b46505894cff618fc8456b2d5071cf326b944d0b535aaf9757",
+      "size": 5897,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_10.png",
+      "sha256": "36b871b444fa757eb063aa74e5dabd7c03425bf38b26d757f824db92c6e10d31",
+      "size": 5577,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_49.png",
+      "sha256": "75d4dd25cab8c1a06cc31e5065fc7a1a0d4e5ccd78818bfea5d2a4aebbfa2c0a",
+      "size": 5646,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_31.png",
+      "sha256": "e1bf4af0cb778acc4a8585b277b311571151fae146900b9cec39aaa0e2a97d3c",
+      "size": 5412,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_25.png",
+      "sha256": "889c34099eeddd341e9544049bd0661a86e6b5f5cdf178bb8688ec44a513f9b9",
+      "size": 5368,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_26.png",
+      "sha256": "8523cd1f2efbf59642c7280bdf9e46278bbda51d4ac67af0eedd35fce114dddd",
+      "size": 5276,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_36.png",
+      "sha256": "bb35ee492b7d4399fcbe97eadedf28d71b5a2ba35c766374f298fcb7ba6cd9cc",
+      "size": 5311,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_54.png",
+      "sha256": "8946f20eefbe9d6591e336c3af57519e848914d4982e4443e5ffa66ba006cfb7",
+      "size": 4718,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_35.png",
+      "sha256": "4a3db70af8d48be8524607fa1fe3640985fe909e67a4c1e92a3d3af2cea06951",
+      "size": 4919,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_44.png",
+      "sha256": "45c77b0c0d1ae9de80722c36205b5c1fde29a0bf1f6a46b03459ef7ba30420a9",
+      "size": 5637,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_48.png",
+      "sha256": "451e224853215620418e0ab5f3bc845be776bf03968fb52b7c7f1adee09a2820",
+      "size": 6008,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_29.png",
+      "sha256": "6cad6edbae0a29710c72acdebd2bf6ef3d40be16aa3b3361d0bd56a90bdb4813",
+      "size": 5180,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_57.png",
+      "sha256": "df24b7be2b476bed227bc62957f31f12e825f3430833890a7d57e9010fea83e2",
+      "size": 11255,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_51.png",
+      "sha256": "6492befcc1df12e451910a5884ae07775946592af6727c655df392f41d49c919",
+      "size": 5388,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_16.png",
+      "sha256": "6f67348aea91fada3b892590aa9903f150b141565bb6546eceafc8fb8e218c33",
+      "size": 5219,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_58.png",
+      "sha256": "8498cd57de1cdce75d1270e8488053821995c22a1836ff7cd48b4713564af772",
+      "size": 11743,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_19.png",
+      "sha256": "7e9ff93b59ba1bfc0adb943bddfd2fb6885d3d25d5b0b6cae806344d4bf8574d",
+      "size": 5179,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_15.png",
+      "sha256": "567f76ceab33dd1769fa7b9d8bfb17c2ab821543b87c53105dd1e38c64594084",
+      "size": 4799,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_1.png",
+      "sha256": "a5cdcbe04693f02b3a6998e47755a910ce1065991eb602a165ebbf5656d47717",
+      "size": 5026,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_3.png",
+      "sha256": "bc3f8509f31a7c39c5bf91cd7fd1a2f72a2a4b2a79683c295e1cd1519930726c",
+      "size": 4858,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_50.png",
+      "sha256": "24494f81be4cd3e0663f6fa107ceed57838afacecc58a0f76d2542bff9a8ebfa",
+      "size": 5514,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_59.png",
+      "sha256": "056176ecc3e35b7d2cfdbc489e432fc4a6904845ea774fe4654436b95e7aaa26",
+      "size": 14560,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_27.png",
+      "sha256": "7968a599a025cb8c121dde748c0e0bb0fa750a173da25d1673ddd2b559c4f820",
+      "size": 4860,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_42.png",
+      "sha256": "3a91fa43d7ccf63960bc64633fe5a91e3d1e65a843c0dededb38914ee743af22",
+      "size": 5526,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_55.png",
+      "sha256": "9381543e5708bef857875c375535923d80d8ce2f0a3d7c1044b9c6e08d0a7dd6",
+      "size": 11949,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_18.png",
+      "sha256": "f132023ae3151a1638726b352981dc006f3fc74b977fd6c4b31245cee5149697",
+      "size": 5082,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_17.png",
+      "sha256": "b035a71426918d623ec2bc5aa2ea0a31c3f644d8a5c64a2784b0b3fd7df7256d",
+      "size": 5498,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_56.png",
+      "sha256": "6c75c54f65aaee2afb4c95777bc1ce45a57bfeb5e4786b8c3ade890ccd780bd1",
+      "size": 7097,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_32.png",
+      "sha256": "46b6da9a209a86c8ba3222f4101c3193300a39d755b66f70ff7f53a61182cd90",
+      "size": 4542,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_8.png",
+      "sha256": "c5ffdd2ed0a4bc59228cb403b08117ab1a836a2fee92d6d2a4824ae3341b1a98",
+      "size": 5131,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_43.png",
+      "sha256": "e86b945b55139a763540937ce055822bc63ac1a0380adfe4ce6ed8f4d1bcc4df",
+      "size": 5630,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_9.png",
+      "sha256": "de2fa597d3e9d5019d17b5414adea72862841d9d16ab09c06238fa49a0ec9bc5",
+      "size": 5210,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_30.png",
+      "sha256": "e3028cd639286ad2f2a3fcfe706784f430602d8861a38c2c095431d611edc016",
+      "size": 5422,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_14.png",
+      "sha256": "15c2f5cb681346e37daa2c343fcf36a75c3337269a0cf22882311b269940eccd",
+      "size": 5162,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_21.png",
+      "sha256": "a31576b34301e8a98c15debfdc08ab8407a0483b14c4cbcd70c63ff7846bca06",
+      "size": 5645,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_6.png",
+      "sha256": "2ad93e6bd3b9deaf37e400275fa27cf916bdf263f670bfd7c767b7dc287c3205",
+      "size": 5554,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_39.png",
+      "sha256": "8d541dbc200ab84a5dd1cc3a207e6b457f2874068473f3a5d92babfecb296c59",
+      "size": 5154,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_11.png",
+      "sha256": "7c8a929c2c65146d877dfeba5f778d39e251a6407c5c59f53eb3377bae71dca5",
+      "size": 5077,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_46.png",
+      "sha256": "9b8001eba3240787ac8bd2301ba146a0a016a3ae4f3b1387a99879375318c72c",
+      "size": 5692,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_7.png",
+      "sha256": "dfb53c53fb330dfff0d74ba955c22a75702ad0052c306aba71c361c014eca60d",
+      "size": 5184,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_22.png",
+      "sha256": "f295d60a19a1184ccbafa09cfc5ce2c3deb0b4cc3f54424f0754f74f5c39803a",
+      "size": 4897,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_12.png",
+      "sha256": "b30c2171f53c453fa0a2d3c0c194d89ddc6643f0220deeff250bdcace791cfff",
+      "size": 5666,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_28.png",
+      "sha256": "1776fbc0e1d716242ec4ef3b0a15c89929c1f3da7718f97d0c1ed255101ba5c9",
+      "size": 4982,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_47.png",
+      "sha256": "bce08c14e824eec688b30f052801c37eedb4d70dcf67b3f66a7af14fe4fcb48f",
+      "size": 5437,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_41.png",
+      "sha256": "c7a904db6d83f227a741a0089dd6bbb4399b4686a44f9b1936bd65dcbc889f65",
+      "size": 5358,
+      "width": 120,
+      "height": 120
+    },
+    {
+      "file": "emoji_dr_20.png",
+      "sha256": "a7df21075a931ce4f253d9fc9f0a46ccc9b67fd5f94ecd90e7583f19b502ef95",
+      "size": 4981,
+      "width": 120,
+      "height": 120
+    }
+  ]
+}

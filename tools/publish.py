@@ -19,7 +19,7 @@ REPO = OWNER + "/hongguo-desktop"
 LEGACY = OWNER + "/hongguo-desktop-releases"
 VERSION = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
 # 仅供旧 1.9.x 更新器比较与固定文件名使用，不是新客户端版本。
-LEGACY_BRIDGE_VERSION = "1.9.11"
+LEGACY_BRIDGE_VERSION = "1.9.12"
 
 
 def token():

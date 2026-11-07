@@ -1,0 +1,17 @@
+.danmaku-canvas{position:absolute;inset:0;width:100%;height:100%;z-index:2;pointer-events:none}
+.danmaku-actions{display:flex;align-items:center;gap:0;flex:none}
+.player-controls .danmaku-toggle{font-size:17px;font-weight:600;border-radius:6px 0 0 6px;width:34px}
+.player-controls .danmaku-settings-button{width:25px;border-radius:0 6px 6px 0;opacity:.8}
+.danmaku-panel{position:absolute;right:20px;bottom:72px;width:300px;max-height:calc(100dvh - 180px);overflow-y:auto;border:1px solid #ffffff24;border-radius:12px;background:#202026f5;box-shadow:0 12px 40px #0006;backdrop-filter:blur(16px);padding:16px;color:#eee;cursor:default;z-index:5;text-align:left}
+.danmaku-panel header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
+.danmaku-panel strong{font-size:14px;font-weight:600}
+.danmaku-panel header small{display:block;color:#999aa6;font-size:11px;margin-top:4px}
+.danmaku-setting{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;font-size:12px}
+.danmaku-setting>span{min-width:85px;flex:none}.danmaku-setting small{color:#a8a8b4;font-size:10px;margin-left:5px}
+.danmaku-setting input{width:135px;accent-color:var(--brand)}.danmaku-setting select{width:145px}
+.danmaku-words{display:grid;grid-template-columns:1fr auto;gap:9px;margin-top:15px;font-size:12px;border-top:1px solid #ffffff16;padding-top:15px}
+.danmaku-words>span{grid-column:1/-1}.danmaku-words input{grid-column:1/-1;min-width:0;border:1px solid #ffffff22;border-radius:6px;padding:8px 9px;background:#ffffff08;color:#eee;font-size:11px}
+.danmaku-words button,.danmaku-panel footer button{border:0;background:transparent;color:var(--brand);font-size:11px;padding:3px 0;cursor:pointer;text-align:left}
+.danmaku-panel footer{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid #ffffff16;margin-top:15px;padding-top:12px}
+.danmaku-panel footer>span{font-size:10px;color:#a8a8b4;line-height:1.5}.danmaku-panel footer button{display:flex;align-items:center;gap:5px;flex:none}
+@media(max-width:1040px){.player-controls .controls-row{gap:6px;flex-wrap:wrap}.danmaku-panel{right:12px;bottom:77px;width:min(300px,calc(100% - 24px))}}

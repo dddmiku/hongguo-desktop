@@ -3,13 +3,15 @@ export interface Series { id: string; title: string; cover: string; intro: strin
 export interface Episode { index: number; vid: string; title: string; duration?: number; }
 export interface SeriesDetail { series: Series; episodes: Episode[]; }
 export interface HistoryItem { series: Series; episode: number; position: number; duration: number; watchedAt: number; uid: string; }
-export interface Settings { theme: 'dark' | 'light' | 'system'; quality: string; rate: number; autoplay: boolean; volume: number; cacheGB: number; closeToTray: boolean; bossKey: string; }
+export interface Settings { theme: 'dark' | 'light' | 'system'; quality: string; rate: number; autoplay: boolean; volume: number; cacheGB: number; closeToTray: boolean; bossKey: string; danmaku?: import('./danmaku-settings').DanmakuPreferences; }
 export interface Library { history: HistoryItem[]; favorites: Series[]; historyTotal?: number; }
 export interface HistoryQuery { search?: string; period?: 'all' | 'today' | 'week' | 'month'; status?: 'all' | 'unfinished' | 'finished'; cursor?: string; limit?: number; }
 export interface HistoryPage { items: HistoryItem[]; total: number; nextCursor: string | null; }
 export interface Session { loggedIn: boolean; uid: string; nickname: string; avatar: string; mobile: string; }
 export interface Comment { id: string; text: string; nickname: string; avatar: string; likes: number; time: string; }
 export interface CommentsPage { items: Comment[]; total: number; cursor: number; hasMore: boolean; }
+export interface DanmakuItem { id: string; text: string; time: number; }
+export interface DanmakuPage { items: DanmakuItem[]; start: number; end: number; hasMore: boolean; seriesId: string; vid: string; source: 'mobile'; }
 export interface MediaSession { id: string; url: string; phase: 'preparing' | 'ready' | 'complete' | 'error' | 'cancelled'; error?: string; cached?: boolean; quality?: string; duration?: number; }
 export interface CacheStatus { bytes: number; limit: number; entries: number; active: number; }
 export interface Health { ok: boolean; version: string; signer: boolean; error?: string; }

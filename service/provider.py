@@ -25,6 +25,7 @@ import time
 from urllib.parse import urlsplit
 
 import requests
+import danmaku as danmaku_contract
 from progress_contract import build_playback_progress_item, build_progress_item, epoch_seconds, mobile_position_seconds
 
 
@@ -564,6 +565,36 @@ class Provider:
             return {"items": items, "total": number(info.get("total")), "cursor": number(info.get("cursor")),
                     "hasMore": bool(info.get("has_more"))}
         return self.cache.get(("comments", sid, int(episode), int(cursor)), 30, lambda: self._read("读取评论", read))
+
+    def danmaku(self, series_id, episode, position=0, duration=0, refresh=False):
+        sid = identifier(series_id)
+        if isinstance(episode, bool) or not isinstance(episode, int) or not 1 <= episode <= 100000:
+            raise ProviderError("INPUT_INVALID", "弹幕集数不正确", 400)
+        try:
+            danmaku_contract.milliseconds(position)
+            danmaku_contract.milliseconds(duration)
+        except ValueError:
+            raise ProviderError("INPUT_INVALID", "弹幕播放位置不正确", 400) from None
+        detail = self.detail(sid)
+        target = next((row for row in detail["episodes"] if row["index"] == episode), None)
+        if not target:
+            raise ProviderError("EPISODE_NOT_FOUND", "这集不存在", 404)
+        full_duration = duration or target.get("duration") or 0
+        credentials = dict(self.account.load_session() or {})
+        identity = self.account._session_identity(credentials)
+        key = ("danmaku", identity, sid, episode, int(position // 30), full_duration)
+        def read():
+            request = danmaku_contract.list_request(sid, target["vid"], position, full_duration)
+            response = self.account._json(self.account._call("POST",
+                f"/novel/commentapi/comment/list/{target['vid']}/v1/", body=request, session=credentials))
+            if self.account._account_changed(credentials):
+                raise ProviderError("ACCOUNT_CHANGED", "账号已切换，请重试读取弹幕", 409)
+            try:
+                return danmaku_contract.page(response, sid, target["vid"], position, full_duration)
+            except ValueError:
+                raise ProviderError("DANMAKU_UNAVAILABLE", "手机弹幕暂时无法加载，请稍后重试") from None
+        if refresh: self.cache.invalidate(key)
+        return self.cache.get(key, 60, lambda: self._read("读取手机弹幕", read))
 
     def session(self):
         value = self.account.public_session()

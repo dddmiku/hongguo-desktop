@@ -71,7 +71,7 @@ try{
   const sameIdentity=before.uid===after.uid&&before.loggedIn===after.loggedIn;
   check('账号身份保留',sameIdentity,{sameIdentity,loggedIn:after.loggedIn});
   check('完整历史、收藏及偏好保留',after.history>=before.history&&after.allHistory>=before.allHistory&&
-    after.favorites>=before.favorites&&JSON.stringify(after.settings)===JSON.stringify(before.settings),
+    after.favorites>=before.favorites&&Object.entries(before.settings).every(([key,value])=>JSON.stringify(after.settings[key])===JSON.stringify(value)),
     {historyBefore:before.history,historyAfter:after.history,libraryTotal:after.libraryTotal,recent:after.recent,favoritesBefore:before.favorites,favoritesAfter:after.favorites,
       schema:after.schema,quality:after.settings.quality,rate:after.settings.rate});
   await quit(instance);instance=undefined;

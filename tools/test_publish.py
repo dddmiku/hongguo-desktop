@@ -184,11 +184,11 @@ class PublishTests(unittest.TestCase):
             P.publish("fixture", legacy=True)
         feed = json.loads((release_dir / "legacy-publish/latest.json").read_text(encoding="utf-8"))
         self.assertEqual(feed["platforms"]["android-tv"], tv)
-        self.assertEqual(feed["version"], "1.9.11")
+        self.assertEqual(feed["version"], P.LEGACY_BRIDGE_VERSION)
         self.assertEqual(feed["migration"]["targetVersion"], "1.1.0")
         self.assertIn("/v1.1.0/hongguo-1.1.0-setup.exe", feed["migration"]["url"])
         self.assertEqual(previous, old)
-        self.assertEqual(make.call_args.kwargs["version"], "1.9.11")
+        self.assertEqual(make.call_args.kwargs["version"], P.LEGACY_BRIDGE_VERSION)
 
 
 if __name__ == "__main__":

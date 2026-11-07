@@ -33,7 +33,10 @@ try{
   await page.waitForFunction(()=>document.querySelector('video[data-active=true]')?.readyState>=2&&document.querySelector('video[data-active=true]')?.paused&&document.querySelector('.switch-status')===null,undefined,{timeout:120000});
   check('暂停时切画质仍保持暂停',await page.locator('video[data-active=true]').evaluate(v=>v.paused));
   await page.getByTitle('播放（空格）').click();await page.waitForFunction(()=>!document.querySelector('video[data-active=true]').paused);
-  await page.locator('.autoplay-switch input').check();
+  const autoplay = page.locator('.autoplay-switch input');
+  if (!await autoplay.isChecked()) await autoplay.click();
+  // The controlled value is committed after IPC persistence completes.
+  await page.waitForFunction(async () => document.querySelector('.autoplay-switch input')?.checked && (await window.hongguo.getSettings()).autoplay);
   await page.waitForFunction(()=>{const v=document.querySelector('video[data-active=true]');return Number.isFinite(v.duration)&&v.duration>30;},undefined,{timeout:120000});
   const autoEpisode=await page.locator('video[data-active=true]').evaluate(v=>Number(v.dataset.episode));
   await page.waitForFunction(()=>{const v=document.querySelector('video[data-active=false]');return v.readyState>=2&&v.videoWidth&&v.paused;},undefined,{timeout:120000});

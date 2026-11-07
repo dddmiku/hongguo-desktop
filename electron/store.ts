@@ -2,8 +2,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { HistoryItem, HistoryQuery, Library, PlaybackProgress, Series, Settings } from '../shared/contracts';
 import { HistoryStore,epochSeconds } from './history-store';
+import { defaultDanmaku, danmakuPreferences } from '../shared/danmaku-settings';
 
-export const defaults: Settings = { theme: 'dark', quality: '1080p', rate: 1, autoplay: true, volume: .8, cacheGB: 4, closeToTray: true, bossKey: 'CommandOrControl+Shift+B' };
+export const defaults: Settings = { theme: 'dark', quality: '1080p', rate: 1, autoplay: true, volume: .8, cacheGB: 4, closeToTray: true, bossKey: 'CommandOrControl+Shift+B', danmaku: defaultDanmaku };
 type Data = { schema: 1|2; settings: Settings; libraries: Record<string, Library>; outbox: Record<string,HistoryItem> };
 const record=(value:unknown):value is Record<string,unknown>=>!!value&&typeof value==='object'&&!Array.isArray(value);
 function storedHistory(value:unknown):value is HistoryItem {
@@ -43,6 +44,7 @@ export function validateSettings(value: Partial<Settings>): Partial<Settings> {
   if (typeof value.cacheGB === 'number' && Number.isFinite(value.cacheGB)) clean.cacheGB = Math.max(1,Math.min(32,value.cacheGB));
   if (typeof value.autoplay === 'boolean') clean.autoplay = value.autoplay;
   if (typeof value.closeToTray === 'boolean') clean.closeToTray = value.closeToTray;
+  if (record(value.danmaku)) clean.danmaku = danmakuPreferences(value.danmaku);
   if (typeof value.bossKey === 'string' && value.bossKey.length < 80 && /^(CommandOrControl|Control|Alt|Shift)(\+(CommandOrControl|Control|Alt|Shift))*\+[A-Z0-9]$/.test(value.bossKey)) clean.bossKey = value.bossKey;
   return clean;
 }
@@ -85,7 +87,7 @@ export class Store {
       throw new Error('本机片库迁移或保存未完成，原文件与有效备份已保留，请重试启动');
     }
   }
-  settings() { return {...this.data.settings}; }
+  settings() { return structuredClone(this.data.settings); }
   async saveSettings(value: Partial<Settings>) { this.data.settings = {...this.data.settings,...validateSettings(value)}; await this.persist(); return this.settings(); }
   library(uid: string): Library { const lib=this.data.libraries[uid];return {history:this.history.query(uid,{limit:50}).items,favorites:structuredClone(lib?.favorites||[]),historyTotal:this.history.count(uid)}; }
   historyPage(uid:string,query:HistoryQuery={}){return this.history.query(uid,query);}
