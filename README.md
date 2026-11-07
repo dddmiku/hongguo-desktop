@@ -6,6 +6,8 @@
 
 ## 安装与使用
 
+Windows PC 的源码、下载、更新和反馈在本仓库独立维护。Android TV / 电视盒子请使用 [hongguo-tv](https://github.com/dddmiku/hongguo-tv)。旧混合仓库自 **2026 年 11 月 7 日**起停止维护，详见 [停止维护与迁移说明](docs/legacy-retirement.md)。
+
 在 [GitHub Releases](https://github.com/dddmiku/hongguo-desktop/releases) 下载最新 `hongguo-*-setup.exe`，按向导安装。安装包自带播放所需运行时，无需另装 Python、Java 或 FFmpeg。
 
 常用功能：

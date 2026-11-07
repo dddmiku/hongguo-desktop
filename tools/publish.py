@@ -1,4 +1,4 @@
-"""发布独立客户端与旧版本迁移入口。凭据只在内存和 Git 子进程环境中。"""
+"""发布独立 PC 客户端。旧混合仓库已停止维护；凭据只在内存和 Git 子进程环境中。"""
 import argparse
 import copy
 import ctypes
@@ -253,6 +253,8 @@ def legacy_feed(secret):
 
 
 def publish(secret, legacy=False):
+    if legacy:
+        raise RuntimeError("hongguo-desktop-releases 已于 2026-11-07 停止维护；常规更新仅发布 PC 新仓库")
     out = ROOT / "release"
     installer = out / ("hongguo-%s-setup.exe" % VERSION)
     if not installer.is_file():
@@ -260,47 +262,24 @@ def publish(secret, legacy=False):
     archive = out / "runtime-win-x64.zip"
     if not archive.is_file():
         raise RuntimeError("可重建运行时尚未归档")
-    previous = legacy_feed(secret)
     digest = hashlib.sha256(installer.read_bytes()).hexdigest()
     notes = (ROOT / "docs/release-notes.md").read_text(encoding="utf-8")
-    platforms = copy.deepcopy(previous.get("platforms") or {})
+    platforms = {}
     platforms["windows-x86_64"] = {"version": VERSION, "sha256": digest, "size": installer.stat().st_size,
         "url": "https://github.com/%s/releases/download/v%s/%s" % (REPO, VERSION, installer.name)}
     feed = {"version": VERSION, "sha256": digest, "notes": notes, "platforms": platforms,
             "migration": {"repository": "https://github.com/" + REPO, "preservesLegacyData": True}}
-    if legacy:
-        bridge_installer = out / ("hongguo-%s-setup.exe" % LEGACY_BRIDGE_VERSION)
-        shutil.copyfile(installer, bridge_installer)
-        platforms["windows-x86_64"] = {"version": LEGACY_BRIDGE_VERSION, "sha256": digest,
-            "size": installer.stat().st_size,
-            "url": "https://github.com/%s/releases/download/v%s/%s" % (LEGACY, LEGACY_BRIDGE_VERSION, bridge_installer.name)}
-        feed["version"] = LEGACY_BRIDGE_VERSION
-        feed["migration"].update({"targetVersion": VERSION,
-            "url": "https://github.com/%s/releases/download/v%s/%s" % (REPO, VERSION, installer.name)})
-        feed["notes"] = "旧客户端兼容迁移包：安装后使用全新红果桌面 " + VERSION + "。\n\n" + notes
-    latest = out / ("legacy-latest.json" if legacy else "latest.json")
+    latest = out / "latest.json"
     latest.write_text(json.dumps(feed, ensure_ascii=False, indent=2), encoding="utf-8")
-    checksums = out / ("LEGACY_SHA256SUMS.txt" if legacy else "SHA256SUMS.txt")
+    checksums = out / "SHA256SUMS.txt"
     runtime_manifest = json.loads((ROOT / "runtime-manifest.json").read_text(encoding="utf-8"))
     publish_runtime = runtime_manifest["version"] == VERSION
     public_assets = [installer, archive] if publish_runtime else [installer]
-    checksums.write_text("\n".join(hashlib.sha256(a.read_bytes()).hexdigest() + "  " + a.name for a in ((bridge_installer,) if legacy else public_assets)), encoding="utf-8")
-    if not legacy:
-        if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT).strip():
-            raise RuntimeError("源码仍有未提交改动，停止发布")
-        source_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-        make_release(REPO, [*public_assets, latest, checksums], notes, secret, source_commit=source_commit)
-    else:
-        migration_notes = "新版客户端已迁移到独立公开源码仓库 [hongguo-desktop](https://github.com/%s)。\n\n" % REPO
-        migration_notes += "旧客户端可以直接检查更新并下载安装。首次启动会只读导入旧账号、历史和收藏，旧安装和数据保留。\n\n" + notes
-        migration_notes += "\n\n兼容桥版本 %s 仅帮助旧 1.9.x 检测到迁移；新应用版本是 %s。" % (LEGACY_BRIDGE_VERSION, VERSION)
-        # 旧 updater 固定读取名为 latest.json 的资源，不能发布 legacy-latest.json。
-        staging = out / "legacy-publish"
-        staging.mkdir(exist_ok=True)
-        public_latest = staging / "latest.json"
-        shutil.copyfile(latest, public_latest)
-        make_release(LEGACY, [bridge_installer, public_latest, checksums], migration_notes, secret,
-                     version=LEGACY_BRIDGE_VERSION, title="旧客户端迁移至红果桌面 " + VERSION)
+    checksums.write_text("\n".join(hashlib.sha256(a.read_bytes()).hexdigest() + "  " + a.name for a in public_assets), encoding="utf-8")
+    if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT).strip():
+        raise RuntimeError("源码仍有未提交改动，停止发布")
+    source_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    make_release(REPO, [*public_assets, latest, checksums], notes, secret, source_commit=source_commit)
 
 
 if __name__ == "__main__":

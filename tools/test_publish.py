@@ -169,7 +169,7 @@ class PublishTests(unittest.TestCase):
         self.run_release(github)
         self.assertTrue(any(method == "DELETE" for method, _, _ in github.calls))
 
-    def test_legacy_bridge_keeps_tv_and_targets_real_new_version(self):
+    def test_pc_release_is_independent_of_retired_repository_and_tv(self):
         release_dir = self.root / "release"
         release_dir.mkdir()
         (release_dir / "hongguo-1.1.0-setup.exe").write_bytes(self.asset.read_bytes())
@@ -181,14 +181,18 @@ class PublishTests(unittest.TestCase):
         previous = {"version": "1.9.10", "platforms": {"android-tv": tv, "windows-x86_64": {"version": "1.9.10"}}}
         old = copy.deepcopy(previous)
         with patch.object(P, "ROOT", self.root), patch.object(P, "VERSION", "1.1.0"), patch.object(P, "legacy_feed", return_value=previous), patch.object(P, "make_release") as make:
-            P.publish("fixture", legacy=True)
-        feed = json.loads((release_dir / "legacy-publish/latest.json").read_text(encoding="utf-8"))
-        self.assertEqual(feed["platforms"]["android-tv"], tv)
-        self.assertEqual(feed["version"], P.LEGACY_BRIDGE_VERSION)
-        self.assertEqual(feed["migration"]["targetVersion"], "1.1.0")
-        self.assertIn("/v1.1.0/hongguo-1.1.0-setup.exe", feed["migration"]["url"])
+            with patch.object(P.subprocess,"check_output",side_effect=[b"", "a"*40]):P.publish("fixture")
+        feed = json.loads((release_dir / "latest.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(feed["platforms"]),{"windows-x86_64"})
+        self.assertEqual(feed["version"], "1.1.0")
+        self.assertIn("/v1.1.0/hongguo-1.1.0-setup.exe", feed["platforms"]["windows-x86_64"]["url"])
         self.assertEqual(previous, old)
-        self.assertEqual(make.call_args.kwargs["version"], P.LEGACY_BRIDGE_VERSION)
+        self.assertEqual(make.call_args.args[0],P.REPO)
+
+    def test_retired_repository_publication_is_blocked(self):
+        with patch.object(P,"request") as remote,self.assertRaisesRegex(RuntimeError,"停止维护"):
+            P.publish("fixture",legacy=True)
+        remote.assert_not_called()
 
 
 if __name__ == "__main__":
