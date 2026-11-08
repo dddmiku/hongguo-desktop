@@ -1,5 +1,5 @@
 // Actual Electron UI + decoded media. Failure injection affects only the isolated test profile.
-import { _electron as electron } from '@playwright/test';
+import {quietElectron as electron} from './quiet-electron.mjs';
 import path from 'node:path';
 import { mkdir,writeFile } from 'node:fs/promises';
 const root=process.cwd(),out=path.join(root,'_work','feedback-qa');await mkdir(out,{recursive:true});

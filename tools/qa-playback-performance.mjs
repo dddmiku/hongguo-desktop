@@ -1,5 +1,5 @@
 // Isolated, hidden measurement. Hardware-independent assertions cover actual decode and idle work.
-import {_electron as electron} from '@playwright/test';
+import {quietElectron as electron} from './quiet-electron.mjs';
 import {mkdir,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';

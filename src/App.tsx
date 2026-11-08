@@ -8,7 +8,10 @@ import Settings from './components/Settings';
 import History from './components/History';
 import { Dialog, Empty, Failure, Loading, Poster, message } from './components/ui';
 import { clearPrivateCatalogs } from './catalog-cache';
-const Player = lazy(() => import('./components/Player'));
+import {mediaPreload} from './playback/MediaPreload';
+import PlaybackPlaceholder from './components/PlaybackPlaceholder';
+const loadPlayer=()=>import('./components/Player');
+const Player = lazy(loadPlayer);
 
 type Page = CatalogPage | 'favorites' | 'history' | 'account' | 'settings';
 const defaults: Preferences = { theme: 'dark', quality: 'auto', rate: 1, autoplay: true, volume: .8, cacheGB: 4, closeToTray: true, bossKey: 'Ctrl+Shift+B' };
@@ -25,6 +28,7 @@ export default function App() {
   const [playVisible, setPlayVisible] = useState(false);
   const [historyRevision, setHistoryRevision] = useState(0);
   const [drawer, setDrawer] = useState(false);
+  const preloadTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined);
   const [session, setSession] = useState<Session | null>(null);
   const requests = useRef(0), toggling = useRef(new Set<string>()), latestSettings = useRef(settings), scroll = useRef<HTMLDivElement>(null), search = useRef<HTMLInputElement>(null);
   const scrollPositions = useRef(new Map<string, number>()), restoringScroll = useRef(false);
@@ -37,7 +41,7 @@ export default function App() {
   useEffect(()=>window.hongguo?.onSession(setSession),[]);
   useEffect(()=>setHistoryRevision(value=>value+1),[library]);
   useEffect(() => { if (window.hongguo) void refreshSession(); }, [refreshSession]);
-  useEffect(() => { clearPrivateCatalogs(); }, [session?.uid]);
+  useEffect(() => { clearPrivateCatalogs(); return()=>{clearTimeout(preloadTimer.current);if(window.hongguo)mediaPreload(window.hongguo).clear();}; }, [session?.uid]);
   useEffect(()=>{
     const online=()=>{void window.hongguo?.setOnline?.(navigator.onLine).catch(()=>{});};
     online();window.addEventListener('online',online);window.addEventListener('offline',online);
@@ -67,15 +71,18 @@ export default function App() {
   const afterLogin = useCallback(async () => { await refreshSession(); const result = await window.hongguo.syncLibrary(); setLibrary(result.library); notify(result.warnings.length ? result.warnings.join('；') : '观看历史与收藏已同步'); }, [notify, refreshSession]);
   const favorite = async (series: Series) => { if (toggling.current.has(series.id)) return; toggling.current.add(series.id); try { setLibrary(await window.hongguo.toggleFavorite(series)); } catch (e) { notify(message(e)); } finally { toggling.current.delete(series.id); } };
   const removeHistory = async (id: string) => { setLibrary(await window.hongguo.removeHistory(id)); };
-  const closeDetail = useCallback(() => { requests.current++; setDetailId(''); setDetail(null); setDetailError(''); }, []);
+  const closeDetail = useCallback((preservePrepared=false) => {clearTimeout(preloadTimer.current);if(!preservePrepared)mediaPreload(window.hongguo).clear();requests.current++; setDetailId(''); setDetail(null); setDetailError(''); }, []);
+  const prepareEpisode=(value:SeriesDetail,index:number,position=0)=>{mediaPreload(window.hongguo).prepare({seriesId:value.series.id,episode:index,quality:latestSettings.current.quality,start:position,duration:value.episodes.find(item=>item.index===index)?.duration});};
   const openDetail = async (series: Series, autoplay = false, progress?: HistoryItem) => {
+    void loadPlayer().catch(()=>{});
+    clearTimeout(preloadTimer.current);mediaPreload(window.hongguo).clear();
     setDrawer(false);
     const remembered = progress || library.history.find(item=>item.series.id===series.id); setSelectedHistory(remembered);
     const id = ++requests.current; setDetailId(series.id); setDetail(null); setDetailError(''); setEpisodeLimit(120);
-    try { const result = await window.hongguo.request<SeriesDetail>(`/catalog/series/${encodeURIComponent(series.id)}`); if (id !== requests.current) return; if (autoplay) { setPlay({ detail: result, episode: remembered?.episode || 1, position: remembered?.position }); setPlayVisible(true); setDetailId(''); } else setDetail(result); }
+    try { const result = await window.hongguo.request<SeriesDetail>(`/catalog/series/${encodeURIComponent(series.id)}`); if (id !== requests.current) return; const index=remembered?.episode||result.episodes[0]?.index||1; if (autoplay) {prepareEpisode(result,index,remembered?.position); setPlay({ detail: result, episode: index, position: remembered?.position }); setPlayVisible(true); setDetailId(''); } else {setDetail(result);preloadTimer.current=setTimeout(()=>{if(requests.current===id)prepareEpisode(result,index,remembered?.position);},250);} }
     catch (e) { if (id === requests.current) setDetailError(message(e)); }
   };
-  const start = (value: SeriesDetail, episode: number, position?: number) => { closeDetail(); setPlay({ detail: value, episode, position }); setPlayVisible(true); };
+  const start = (value: SeriesDetail, episode: number, position?: number) => {prepareEpisode(value,episode,position); closeDetail(true); setPlay({ detail: value, episode, position }); setPlayVisible(true); };
   const go = (next: Page) => { setPage(next); setPlayVisible(false); setDrawer(false); closeDetail(); };
   const returnPlayer = () => { closeDetail(); setDrawer(false); setPlayVisible(true); };
   const closeDrawer = useCallback(() => setDrawer(false), []);
@@ -83,7 +90,7 @@ export default function App() {
   const currentHistory = detail ? selectedHistory?.series.id===detail.series.id?selectedHistory:library.history.find(item => item.series.id === detail.series.id) : undefined;
   const isFavorite = detail ? library.favorites.some(item => item.id === detail.series.id) : false;
   const favoriteView = <div className="library-page"><div className="page-heading"><div><h1>我的收藏</h1><p>喜欢的故事，留在这里慢慢看。登录后自动同步手机收藏。</p></div><button className="btn secondary" onClick={sync} disabled={syncing}><RefreshCw size={16} className={syncing?'spin':''}/>{syncing?'正在刷新…':'刷新'}</button></div><div className="library-summary"><span><ShieldCheck size={15}/>本机收藏 · 离线也可查看</span><span>{library.favorites.length} 部作品</span></div>{library.favorites.length?<div className="series-grid">{library.favorites.map(series=><SeriesCard key={series.id} series={series} favorite onOpen={()=>void openDetail(series)} onFavorite={()=>void favorite(series)}/>)}</div>:<Empty title="把喜欢的故事收藏起来" text="在片单或详情里点击收藏，就能在这里快速找到。"><button className="btn primary" onClick={()=>go('discover')}>去发现好剧<ArrowRight size={16}/></button></Empty>}</div>;
-  const playerView = play && <div className="playback-page" hidden={!playVisible}><Suspense fallback={<Loading text="正在打开播放器…" />}><Player key={play.detail.series.id+':'+play.episode+':'+play.position} detail={play.detail} initialEpisode={play.episode} initialPosition={play.position} isActive={playVisible} settings={settings} accountKey={session?.uid || 'local'} onClose={closePlayer} onSettings={playerSettings} onLibrary={playerLibrary} /></Suspense></div>;
+  const playerView = play && <div className="playback-page" hidden={!playVisible}><Suspense fallback={<PlaybackPlaceholder series={play.detail.series}/>}><Player key={play.detail.series.id+':'+play.episode+':'+play.position} detail={play.detail} initialEpisode={play.episode} initialPosition={play.position} isActive={playVisible} settings={settings} accountKey={session?.uid || 'local'} onClose={closePlayer} onSettings={playerSettings} onLibrary={playerLibrary} /></Suspense></div>;
   return <div className="app-shell app-topnav">
     <main className="app-main"><header className="app-header">
       <button className="top-brand" onClick={() => go('discover')} aria-label="红果桌面首页"><span className="brand-symbol"><span /><span /><i /></span><strong>红果<span>桌面</span></strong></button>

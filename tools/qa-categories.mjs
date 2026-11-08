@@ -1,5 +1,5 @@
 // Exercise the real Electron bridge and gateway; every catalog reply comes from the upstream.
-import { _electron as electron } from '@playwright/test';
+import {quietElectron as electron} from './quiet-electron.mjs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 

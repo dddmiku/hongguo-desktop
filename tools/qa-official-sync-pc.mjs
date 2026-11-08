@@ -1,5 +1,5 @@
 // Drive a genuine PC viewing action; never synthesize a library or cloud progress write.
-import {_electron as electron} from '@playwright/test';
+import {quietElectron as electron} from './quiet-electron.mjs';
 import {execFile,spawn} from 'node:child_process';
 import {promisify} from 'node:util';
 import {mkdir,writeFile,readFile} from 'node:fs/promises';

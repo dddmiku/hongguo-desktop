@@ -1,5 +1,6 @@
 // Genuine mobile API data and decoded video; no account, synthetic comments or public writes.
-import { _electron as electron,expect } from '@playwright/test';
+import {expect} from '@playwright/test';
+import {quietElectron as electron} from './quiet-electron.mjs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 const root = process.cwd(), out = path.join(root, '_work', 'danmaku-qa'); await mkdir(out, { recursive: true });
@@ -21,7 +22,7 @@ const pixels = () => page.locator('.danmaku-canvas').evaluate(canvas => {
 });
 try {
   await page.waitForSelector('.app-shell', { timeout: 30000 });
-  await page.evaluate(() => window.hongguo.saveSettings({ quality: '1080p', autoplay: false, rate: 1, danmaku: { enabled: true, opacity: .8, fontSize: 22, area: .5, density: 'standard', blockedWords: [] } }));
+  await page.evaluate(() => window.hongguo.saveSettings({ quality: '1080p', autoplay: false, rate: 1, volume: 0, danmaku: { enabled: true, opacity: .8, fontSize: 22, area: .5, density: 'standard', blockedWords: [] } }));
   await page.reload(); await page.waitForSelector('.app-shell');
   await page.evaluate(() => {
     window.__danmakuDraw = [];

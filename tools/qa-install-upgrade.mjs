@@ -1,5 +1,5 @@
 // Real running-app upgrade QA. Account identities stay in memory; reports contain booleans/counts only.
-import {_electron as electron} from '@playwright/test';
+import {quietElectron as electron} from './quiet-electron.mjs';
 import {spawn,execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {readFile,writeFile,mkdir,realpath,stat} from 'node:fs/promises';

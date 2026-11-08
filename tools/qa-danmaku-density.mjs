@@ -1,5 +1,5 @@
 // Reproduce the user's actual episode, playback speed and sparse density without account writes.
-import {_electron as electron} from '@playwright/test';
+import {quietElectron as electron} from './quiet-electron.mjs';
 import {mkdir,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';

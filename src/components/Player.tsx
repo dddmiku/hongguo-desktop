@@ -4,6 +4,7 @@ import type { CommentsPage, Episode, SeriesDetail, Settings } from '../../shared
 import { SeamlessSwitcher, type PlaybackTarget } from '../playback/SeamlessSwitcher';
 import { HlsDeckLoader, type VideoDeck } from '../playback/HlsDeck';
 import {availablePosition,knownDuration} from '../playback/timeline';
+import {PlaybackEnd} from '../playback/PlaybackEnd';
 import { danmakuPreferences, type DanmakuPreferences } from '../../shared/danmaku-settings';
 import type { DanmakuStatus } from '../danmaku/feed';
 import Danmaku from './Danmaku';
@@ -26,6 +27,7 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, is
   const danmakuPanelRef = useRef(false);
   const pendingDanmaku = useRef<DanmakuPreferences | null>(null);
   const favoritePending=useRef(false);
+  const completion=useRef(new PlaybackEnd());
   const [favoriteBusy,setFavoriteBusy]=useState(false);
   const [active, setActive] = useState(0), [episode, setEpisode] = useState(initialEpisode), [pendingEpisode, setPendingEpisode] = useState<number | null>(null), [phase, setPhase] = useState('准备播放'), [error, setError] = useState('');
   const [playing, setPlaying] = useState(false), [chrome, setChrome] = useState(true), [position, setPosition] = useState(initialPosition), [duration, setDuration] = useState(0), [buffered, setBuffered] = useState(0);
@@ -99,7 +101,7 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, is
     const loader = new HlsDeckLoader(elements, window.hongguo, (deck, message) => {
       if(current()===deck&&deck.target.compatible&&!compatible.current){compatible.current=true;void selectEpisode(deck.target.episode,false,deck.video.currentTime,true,true);return;}
       if (current() === deck && mounted.current) { setError(message); setChrome(true); shouldPlay.current = false; }
-    });
+    },(wanted,message)=>{if(mounted.current&&!current()&&requested.current?.episode===wanted.episode)setPhase(message);});
     const controller = new SeamlessSwitcher<VideoDeck>({
       prepare: (index, wanted, signal) => loader.prepare(index, wanted, signal),
       present: (deck, previous, automatic) => {
@@ -147,11 +149,12 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, is
   useEffect(() => { const layout = playbackLayout.current; const changed = () => { setFullscreen(document.fullscreenElement === layout); hide(); }; document.addEventListener('fullscreenchange', changed); return () => { document.removeEventListener('fullscreenchange', changed); if (document.fullscreenElement === layout) void document.exitFullscreen().catch(() => {}); }; }, [hide]);
   const toggle = useCallback(() => {
     const deck = current(); if (!deck || error) return;
-    shouldPlay.current = deck.video.paused; if (shouldPlay.current && visible.current) { applySound(deck); void deck.video.play().catch(() => {}); } else deck.video.pause(); hide();
+    shouldPlay.current = deck.video.paused; if (shouldPlay.current && visible.current) { completion.current.reset(); applySound(deck); void deck.video.play().catch(() => {}); } else deck.video.pause(); hide();
   }, [error, hide]);
   useEffect(() => window.hongguo.onVisibility(value => { windowVisible.current=value;visible.current = value&&latest.current.isActive; if (!value) { shouldPlay.current = false;resumeAfterNavigation.current=false; void save(); current()?.video.pause();current()?.hls?.stopLoad();switcher.current?.cancelPending(); }else if(latest.current.isActive){const deck=current();deck?.hls?.startLoad(deck.video.currentTime);if(deck)scheduleNext(deck);} }), [save,scheduleNext]);
   useEffect(() => window.hongguo.onShutdown(save), [save]);
   const seekTo=useCallback((value:number)=>{const deck=current();if(!deck||!knownDuration(deck.duration))return;
+    completion.current.reset();
     const destination=Math.min(Math.max(0,value),Math.max(0,deck.duration-.05));
     if(availablePosition(destination,deck.video.seekable)){setPendingPosition(null);deck.video.currentTime=destination;setPosition(destination);}
     else void selectEpisode(deck.target.episode,false,destination,true,true);
@@ -179,10 +182,29 @@ export default function Player({ detail, initialEpisode, initialPosition = 0, is
   const onTime = (index: number) => { const deck = current(); if (!deck || deck.index !== index) return; const element = deck.video;
     const full=episodeDurations.current.get(`${deck.target.seriesId}:${deck.target.episode}`)||knownDuration(deck.duration);if(full)episodeDurations.current.set(`${deck.target.seriesId}:${deck.target.episode}`,full);deck.duration=full;
     setPosition(element.currentTime); setDuration(full); if (element.buffered.length) setBuffered(element.buffered.end(element.buffered.length - 1)); if (Date.now() - lastSaved.current > 10000) { lastSaved.current = Date.now(); void saveDeck(deck); } };
-  const ended = (index: number) => { const deck = current(); if (!deck || deck.index !== index) return; void saveDeck(deck); if (latest.current.settings.autoplay && latest.current.detail.episodes.some(item => item.index === deck.target.episode + 1)) void selectEpisode(deck.target.episode + 1, true); else { shouldPlay.current = false; setPlaying(false); setChrome(true); setPhase('本集播放完毕'); } };
+  const finishEpisode=useCallback((deck:VideoDeck)=>{
+    if(current()!==deck||requested.current||closed.current||!visible.current||!shouldPlay.current||!completion.current.claim(deck.sessionId))return;
+    void saveDeck(deck);
+    if(latest.current.settings.autoplay&&latest.current.detail.episodes.some(item=>item.index===deck.target.episode+1))void selectEpisode(deck.target.episode+1,true);
+    else{shouldPlay.current=false;deck.video.pause();setPlaying(false);setChrome(true);setPhase('本集播放完毕');}
+  },[selectEpisode,saveDeck]);
+  useEffect(()=>{
+    if(!isActive)return;
+    const timer=setInterval(()=>{
+      const deck=current();if(!deck)return;const element=deck.video;
+      const end=Number.isFinite(element.duration)?element.duration:deck.duration;
+      const ready=completion.current.inspect({id:deck.sessionId,time:element.currentTime,duration:end,
+        bufferedEnd:element.buffered.length?element.buffered.end(element.buffered.length-1):0,sealed:deck.sealed,ended:element.ended,
+        playing:shouldPlay.current&&!element.paused,seeking:element.seeking,enabled:visible.current&&!closed.current&&!requested.current&&!error,now:performance.now()});
+      if(ready)finishEpisode(deck);
+    },200);
+    return()=>clearInterval(timer);
+  },[isActive,finishEpisode,error]);
+  const ended = (index: number) => { const deck=current();if(deck?.index===index)finishEpisode(deck); };
   return <div className={`player-page ${theater?'player-theater':''}`}>
     <div className="player-heading"><button className="btn" onClick={close}><ArrowLeft size={17}/> 返回</button><div><h2>{detail.series.title}</h2><span>第 {episode} 集 · 共 {detail.episodes.length} 集</span>{pendingEpisode&&<small className="switch-status">{pendingPosition!==null?`正在定位到 ${time(pendingPosition)}`:`正在准备第 ${pendingEpisode} 集，保留当前画面`}</small>}</div><button className={`icon-button player-favorite ${favorite?'active':''}`} title={favoriteBusy?'正在同步收藏':favorite?'取消收藏':'收藏'} aria-label={favoriteBusy?'正在同步收藏':favorite?'取消收藏':'收藏'} aria-pressed={favorite} disabled={favoriteBusy} onClick={()=>void changeFavorite()}>{favoriteBusy?<LoaderCircle className="spin" size={20}/>:<Heart size={20} fill={favorite?'currentColor':'none'}/>}</button></div>
     <div className="playback-layout" ref={playbackLayout}><div className={`video-stage ${chrome?'':'controls-hidden'}`} onMouseMove={hide} onMouseLeave={()=>{if(playing&&!danmakuPanelRef.current)setChrome(false);}}>
+      {!current()&&!error&&<div className="player-startup-cover" aria-hidden="true">{detail.series.cover&&<img src={detail.series.cover} alt=""/>}<div/></div>}
       <div className="fullscreen-toolbar"><div><strong>{detail.series.title}</strong><span>第 {episode} 集</span></div><button className="icon-button" title="退出全屏（Esc）" onClick={()=>void toggleFullscreen()}><Minimize size={20}/></button></div>
       {[0,1].map(index=><video key={index} ref={element=>{videos.current[index]=element;}} className="decoder-video" data-active={active===index?'true':'false'} data-episode={active===index?episode:undefined} playsInline
         onClick={()=>{if(current()?.index!==index)return;clearTimeout(clickTimer.current);clickTimer.current=setTimeout(toggle,220);}} onDoubleClick={()=>{if(current()?.index!==index)return;clearTimeout(clickTimer.current);void toggleFullscreen();}}

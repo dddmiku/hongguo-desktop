@@ -1,4 +1,4 @@
-import { _electron as electron } from '@playwright/test';
+import {quietElectron as electron} from './quiet-electron.mjs';
 import path from 'node:path';
 import {mkdir} from 'node:fs/promises';
 const root=process.cwd(),out=path.join(root,'docs','screenshots');await mkdir(out,{recursive:true});

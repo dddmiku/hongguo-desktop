@@ -1,5 +1,5 @@
 // Actual decoded video must survive account/settings/history navigation in an isolated profile.
-import { _electron as electron } from '@playwright/test';
+import {quietElectron as electron} from './quiet-electron.mjs';
 import path from 'node:path';
 import {mkdir,writeFile} from 'node:fs/promises';
 const root=process.cwd(),out=path.join(root,'_work','player-navigation');await mkdir(out,{recursive:true});

@@ -1,5 +1,5 @@
 // Final installed binary smoke test. Playback uses a separate, logged-out profile.
-import { _electron as electron } from '@playwright/test';
+import {quietElectron as electron} from './quiet-electron.mjs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 

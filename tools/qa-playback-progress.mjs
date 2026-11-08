@@ -1,4 +1,4 @@
-import {_electron as electron} from '@playwright/test';
+import {quietElectron as electron} from './quiet-electron.mjs';
 import {mkdir,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 const root=process.cwd(),baseline=process.argv.includes('--baseline');
@@ -12,7 +12,7 @@ const check=(name,ok,info)=>{checks.push({name,ok,info});console.log(JSON.string
 async function stage(name,milliseconds){await page.evaluate(name=>{window.__progressStage=name;},name);await page.waitForTimeout(milliseconds);}
 try{
   await page.waitForSelector('.app-shell',{timeout:30000});
-  await page.evaluate(()=>window.hongguo.saveSettings({quality:'1080p',rate:3,autoplay:false}));
+  await page.evaluate(()=>window.hongguo.saveSettings({quality:'1080p',rate:3,autoplay:false,volume:0}));
   await page.reload();await page.waitForSelector('.app-shell');
   await page.evaluate(()=>window.hongguo.request('/media/cache/clear',{method:'POST'}));
   const query='人前小保姆';

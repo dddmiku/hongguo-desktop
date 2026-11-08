@@ -1,4 +1,4 @@
-import { _electron as electron } from '@playwright/test';
+import {quietElectron as electron} from './quiet-electron.mjs';
 import path from 'node:path';
 import {mkdir,writeFile} from 'node:fs/promises';
 const root=process.cwd(),out=path.join(root,'_work','seamless-qa');await mkdir(out,{recursive:true});
@@ -23,7 +23,9 @@ try{
   const invalid=sampled.filter(s=>s.ready<2||!s.width||s.light<0),black=sampled.filter(s=>s.light>=0&&s.light<1);const switched=sampled.findIndex(s=>s.episode===String(before+1));const frameGap=switched>0?sampled[switched].at-sampled[switched-1].at:null;
   check('暖切集过程无媒体清空或黑帧',invalid.length===0&&black.length===0,{frames:sampled.length,invalid:invalid.length,black:black.length,frameGapMs:frameGap});
   await writeFile(path.join(out,'frames.json'),JSON.stringify(sampled,null,2));await page.screenshot({path:path.join(out,'after-switch.png')});
-  const onScreen=await page.evaluate(()=>{const active=document.querySelector('video[data-active=true]');return [...document.querySelectorAll('video')].filter(v=>!v.paused&&!v.muted&&v.volume>0).length===1&&active.readyState>=2;});check('只有活动槽有声音',onScreen);
+  const onScreen=await page.evaluate(()=>{const active=document.querySelector('video[data-active=true]');return [...document.querySelectorAll('video')].filter(v=>!v.paused&&!v.muted&&v.volume>0).length===1&&active.readyState>=2;});
+  const silent=await instance.evaluate(({webContents})=>webContents.getAllWebContents().every(contents=>contents.isAudioMuted()));
+  check('仅活动槽启用音轨，测试窗口强制静音',onScreen&&silent);
   await page.locator('.video-stage').hover({position:{x:20,y:20}});await page.getByTitle('全屏（F）').click();await page.waitForFunction(()=>!!document.fullscreenElement);
   await page.keyboard.press('j');await page.keyboard.press('j');await page.waitForFunction(expected=>Number(document.querySelector('video[data-active=true]')?.dataset.episode)===expected,before+3,{timeout:120000});
   check('快速连续切集只提交最后一集且保留全屏',await page.evaluate(()=>!!document.fullscreenElement&&document.querySelector('video[data-active=true]').readyState>=2));

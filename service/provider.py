@@ -28,6 +28,7 @@ import requests
 import danmaku as danmaku_contract
 from favorite_sync import set_favorite as reconcile_favorite
 from progress_contract import build_playback_progress_item, build_progress_item, epoch_seconds, mobile_position_seconds
+from source_download import SourceDownloader
 
 
 GENRES = {"short_play", "comic_series", "ai_series"}
@@ -327,6 +328,7 @@ class Provider:
         self.source_dir = self.data_dir / "source-cache"
         self.source_dir.mkdir(parents=True, exist_ok=True)
         self.sdk, self.account = sdk, account
+        self.source_downloader=SourceDownloader(lambda *args,**kwargs:self.sdk.http_request(*args,**kwargs))
         self.cache = RequestCache()
         self.catalog_cache = CatalogCache(self.data_dir / "catalog-cache.json")
         self._source_guard = threading.Condition()
@@ -1066,21 +1068,9 @@ class Provider:
             for url in urls:
                 self._cancel(cancelled)
                 try:
-                    with self.sdk.http_request("GET", url, stream=True, timeout=(10, 15)) as response:
-                        response.raise_for_status()
-                        if number(response.headers.get("content-length")) > 512 * 1024 * 1024:
-                            raise ProviderError("MEDIA_TOO_LARGE", "播放文件超过本地处理上限")
-                        count = 0
-                        with encrypted.open("wb") as handle:
-                            for chunk in response.iter_content(256 * 1024):
-                                self._cancel(cancelled)
-                                count += len(chunk)
-                                if count > 512 * 1024 * 1024:
-                                    raise ProviderError("MEDIA_TOO_LARGE", "播放文件超过本地处理上限")
-                                handle.write(chunk)
-                        if count:
-                            downloaded = True
-                            break
+                    self.source_downloader.download(url,encrypted,lambda:self._cancel(cancelled))
+                    downloaded = True
+                    break
                 except ProviderError:
                     raise
                 except Exception:

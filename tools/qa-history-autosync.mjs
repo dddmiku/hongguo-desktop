@@ -1,5 +1,6 @@
 // Exercise the real Electron main, preload, React UI and SQLite with an isolated cloud fixture.
-import {_electron as electron,expect} from '@playwright/test';
+import {expect} from '@playwright/test';
+import {quietElectron as electron} from './quiet-electron.mjs';
 import {build} from 'esbuild';
 import {cp,mkdir,rm,writeFile,readFile} from 'node:fs/promises';
 import {execFileSync} from 'node:child_process';

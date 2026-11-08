@@ -1,5 +1,6 @@
 // Real account reads in a fresh isolated profile. No SMS, login mutation or playback/progress writes.
-import {_electron as electron,expect} from '@playwright/test';
+import {expect} from '@playwright/test';
+import {quietElectron as electron} from './quiet-electron.mjs';
 import {copyFile,mkdir,readFile,rm,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
