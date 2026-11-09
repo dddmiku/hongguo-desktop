@@ -5,9 +5,10 @@ const selected: CatalogSelection = { board: 'hot', sort: 'hot_score', theme: 'ca
 beforeEach(() => { vi.resetModules(); storage.clear(); vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value) }); });
 
 describe('真实分类查询与返回状态', () => {
-  it('首页选择题材后请求片库且完整保留设定、背景的独立上游 ID', async () => {
+  it('旧首页分类不会改变发现流，片库保留设定、背景的独立上游 ID', async () => {
     const { catalogRoute } = await import('./catalog-filters');
-    expect(catalogRoute('discover', '', 'short_play', selected)).toBe('/catalog/browse?genre=short_play&sort=hot_score&theme=cate_5000&setting=cate_5221&background=cate_5338');
+    expect(catalogRoute('discover', '', 'short_play', selected)).toBe('/catalog/home?genre=short_play&mode=discover');
+    expect(catalogRoute('browse', '', 'short_play', selected)).toBe('/catalog/browse?genre=short_play&sort=hot_score&theme=cate_5000&setting=cate_5221&background=cate_5338');
     expect(catalogRoute('browse', '', 'short_play', { ...selected, theme: 'cate_5021', setting: '', background: '' })).toContain('theme=cate_5021&setting=&background=');
   });
   it('未选分类的首页仍请求公开发现，展开面板不会改变片单查询', async () => {
@@ -24,6 +25,16 @@ describe('真实分类查询与返回状态', () => {
     vi.resetModules(); helper = await import('./catalog-filters');
     expect(helper.readCatalogSelection('browse:short_play')).toEqual(selected);
     expect(helper.readCatalogSelection('browse:comic_series').theme).toBe('cate_5876');
+  });
+  it('忽略持久化旧发现分类且不再保存发现分类偏好', async () => {
+    storage.set('hongguo:catalog-selection-v1', JSON.stringify([['discover:short_play', selected], ['browse:short_play', selected]]));
+    const helper = await import('./catalog-filters');
+    expect(helper.readCatalogSelection('discover:short_play')).toMatchObject({ theme: '', setting: '', background: '', expanded: false });
+    expect(helper.readCatalogSelection('browse:short_play')).toEqual(selected);
+    helper.saveCatalogSelection('discover:short_play', selected);
+    expect(helper.readCatalogSelection('discover:short_play').theme).toBe('');
+    helper.saveCatalogSelection('browse:comic_series', selected);
+    expect(storage.get('hongguo:catalog-selection-v1')).not.toContain('discover:');
   });
   it('仅排列真实上游选项，不给缺少爱情的 AI 分类补造标签', async () => {
     const { catalogGroups } = await import('./catalog-filters');

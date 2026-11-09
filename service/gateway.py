@@ -26,6 +26,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from provider import Provider, ProviderError
+from qr_login import QrLoginError
 
 
 def product_version():
@@ -69,6 +70,10 @@ def create_app(provider, token, media_manager=None, signer_ok=lambda: True):
 
     @app.exception_handler(ProviderError)
     async def provider_error(request, error):
+        return JSONResponse({"error": {"code": error.code, "message": error.message}}, status_code=error.status)
+
+    @app.exception_handler(QrLoginError)
+    async def qr_error(request, error):
         return JSONResponse({"error": {"code": error.code, "message": error.message}}, status_code=error.status)
 
     @app.exception_handler(RequestValidationError)
@@ -123,6 +128,14 @@ def create_app(provider, token, media_manager=None, signer_ok=lambda: True):
     def detail(series_id: str):
         return provider.detail(series_id)
 
+    @app.get("/catalog/series/{series_id}/next-season")
+    def next_season(series_id: str, refresh: bool = Query(False)):
+        return provider.next_season(series_id, refresh=refresh)
+
+    @app.get("/catalog/series/{series_id}/seasons")
+    def season_overview(series_id: str, refresh: bool = Query(False)):
+        return provider.season_overview(series_id, refresh=refresh)
+
     @app.get("/catalog/comments")
     def comments(seriesId: str = Query(..., min_length=8, max_length=24), episode: int = Query(..., ge=1, le=100000),
                  cursor: int = Query(0, ge=0, le=1000000)):
@@ -137,6 +150,18 @@ def create_app(provider, token, media_manager=None, signer_ok=lambda: True):
                 position: float = Query(0, ge=0, le=86400), duration: float = Query(0, ge=0, le=86400),
                 refresh: bool = Query(False)):
         return provider.danmaku(seriesId, episode, position, duration, refresh)
+
+    @app.post("/account/qr")
+    def create_qr():
+        return provider.qr_login.create()
+
+    @app.get("/account/qr/{attempt_id}")
+    def qr_status(attempt_id: str):
+        return provider.qr_login.status(attempt_id)
+
+    @app.delete("/account/qr/{attempt_id}")
+    def cancel_qr(attempt_id: str):
+        return provider.qr_login.cancel(attempt_id)
 
     @app.post("/account/send-code")
     def send_code(payload: dict = Body(...)):

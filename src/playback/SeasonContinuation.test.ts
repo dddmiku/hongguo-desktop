@@ -1,0 +1,14 @@
+import {describe,it,expect,vi} from 'vitest';
+import {SeasonContinuation} from './SeasonContinuation';
+import type {NativeBridge,NextSeason,SeriesDetail} from '../../shared/contracts';
+const series={id:'87654321',title:'测试第二季',cover:'',intro:'',totalEpisodes:2,tags:[],actors:[]};
+const found:NextSeason={seriesId:'12345678',status:'found',season:1,nextSeason:2,next:series,source:'official',firstEpisode:1};
+const detail:SeriesDetail={series,episodes:[{index:1,vid:'98765432',title:'第一集'}]};
+const bridge=(request:(route:string)=>Promise<unknown>)=>({request} as Pick<NativeBridge,'request'>);
+describe('season continuation',()=>{
+  it('shares lookup and fetches the actual playable destination once',async()=>{const request=vi.fn(async(route:string)=>route.endsWith('next-season')?found:detail);const continuation=new SeasonContinuation(bridge(request));const first=continuation.resolve('12345678');expect(continuation.resolve('12345678')).toBe(first);expect(await first).toEqual({result:found,detail});expect(request).toHaveBeenCalledTimes(2);expect(await continuation.resolve('12345678')).toEqual({result:found,detail});expect(request).toHaveBeenCalledTimes(2);});
+  it('none and ambiguity never allocate a destination request',async()=>{for(const status of ['none','ambiguous'] as const){const request=vi.fn(async()=>({...found,status,next:null}));expect((await new SeasonContinuation(bridge(request)).resolve('12345678')).detail).toBeNull();expect(request).toHaveBeenCalledOnce();}});
+  it('network failures can be retried without retaining rejected discovery',async()=>{let attempts=0;const request=vi.fn(async(route:string)=>{if(route.endsWith('next-season')&&attempts++===0)throw new Error('offline');return route.endsWith('next-season')?found:detail;});const continuation=new SeasonContinuation(bridge(request));await expect(continuation.resolve('12345678')).rejects.toThrow('offline');await expect(continuation.resolve('12345678')).resolves.toEqual({result:found,detail});});
+  it('leaving a season discards late responses before requesting or presenting its successor',async()=>{let complete!:(value:NextSeason)=>void;const request=vi.fn(()=>new Promise<NextSeason>(done=>{complete=done;}));const continuation=new SeasonContinuation(bridge(request));const pending=continuation.resolve('12345678');continuation.reset();complete(found);await expect(pending).rejects.toMatchObject({name:'AbortError'});expect(request).toHaveBeenCalledOnce();});
+  it('rejects circular or mismatched series and unavailable first episodes',async()=>{for(const response of [{...found,next:{...series,id:'12345678'}},{...found,seriesId:'33333333'}]){await expect(new SeasonContinuation(bridge(async()=>response)).resolve('12345678')).rejects.toThrow();}await expect(new SeasonContinuation(bridge(async(route)=>route.endsWith('next-season')?found:{...detail,episodes:[]})).resolve('12345678')).rejects.toThrow();});
+});

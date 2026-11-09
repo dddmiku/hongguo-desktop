@@ -22,19 +22,52 @@ import re
 import secrets
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 import danmaku as danmaku_contract
 from favorite_sync import set_favorite as reconcile_favorite
 from progress_contract import build_playback_progress_item, build_progress_item, epoch_seconds, mobile_position_seconds
 from source_download import SourceDownloader
+from seasons import SeasonResolver
+from search import search_series
+from qr_login import QrLoginManager, QrLoginError
 
 
 GENRES = {"short_play", "comic_series", "ai_series"}
 QUALITIES = {"auto", "1080p", "720p", "540p", "480p", "360p"}
 SORTS = {"online_time", "hot_score", "hot_collect"}
 CODECS = {"bytevc1", "hevc", "h265", "hvc1", "avc1", "h264"}
+
+
+# Fixed protocol salt for the official playback URL envelope; no account material.
+_PROTOCOL_SALT = bytes.fromhex('4dd4c2e6b83162090e52b3c7a6733ba41cb2462b829ab58a196b39db57177524f49baf7f08e8d68d26a72e37c1a95a2f1f05a51892aef2949732b62a38aadd58')
+
+
+def decode_playback_url(value_base64, seed_base64) -> str | None:
+    """Decode an official URL envelope; return None on malformed/unsupported input."""
+    if not isinstance(value_base64, str) or not isinstance(seed_base64, str):
+        return None
+    from Crypto.Cipher import AES
+    import struct
+    import binascii
+    try:
+        cipher = base64.b64decode(''.join(value_base64.split()), validate=True)
+        seed = base64.b64decode(''.join(seed_base64.split()), validate=True)
+        if len(seed) != 32 or len(cipher) < 20 or (len(cipher) - 4) % 16:
+            return None
+        if struct.unpack('<HH', cipher[:4]) != (0x00A8, 1):
+            return None
+        first = hashlib.sha512(seed).digest()
+        material = hashlib.sha512(first + _PROTOCOL_SALT).digest()
+        plain = AES.new(material[:16], AES.MODE_CBC, material[16:32]).decrypt(cipher[4:])
+        padding = plain[-1]
+        if not 1 <= padding <= 16 or plain[-padding:] != bytes([padding]) * padding:
+            return None
+        text = plain[:-padding].decode('utf-8', errors='strict')
+        return text or None
+    except (ValueError, TypeError, UnicodeError, binascii.Error):
+        return None
 
 
 class ProviderError(Exception):
@@ -330,11 +363,14 @@ class Provider:
         self.sdk, self.account = sdk, account
         self.source_downloader=SourceDownloader(lambda *args,**kwargs:self.sdk.http_request(*args,**kwargs))
         self.cache = RequestCache()
+        self.seasons = SeasonResolver(self.sdk, self.detail, self._read)
         self.catalog_cache = CatalogCache(self.data_dir / "catalog-cache.json")
         self._source_guard = threading.Condition()
         self._sources_running = set()
         self._leases = {}
         self._write_lock = threading.Lock()
+        self.qr_login = QrLoginManager(self.account, self._commit_qr_session,
+            lambda: self.account._session_identity(self.account.load_session() or {}))
         self._last_progress = {}
         self._cooldown_until = 0.0
         self._closed = threading.Event()
@@ -446,8 +482,10 @@ class Provider:
         query = str(query or "").strip()
         if not 1 <= len(query) <= 80 or any(ord(char) < 32 for char in query):
             raise ProviderError("INPUT_INVALID", "请输入 1–80 个字的剧名", 400)
-        return {"items": self.cache.get(("search", query), 120,
-                lambda: self._read("搜索短剧", lambda: self._list(self.sdk.search(query, max_items=40))))}
+        def fetch(term):
+            return self.cache.get(("search", term), 120,
+                lambda: self._read("搜索短剧", lambda: self._list(self.sdk.search(term, max_items=40))))
+        return search_series(query, fetch)
 
     def rank(self, board="hot", genre="short_play"):
         self._genre(genre)
@@ -529,6 +567,12 @@ class Provider:
             return {"series": normalize_series({**meta, "id": sid}), "episodes": episodes}
         return self.cache.get(("detail", sid), 600, lambda: self._read("读取剧集", read))
 
+    def next_season(self, series_id, refresh=False):
+        return self.seasons.resolve(identifier(series_id), refresh=refresh)
+
+    def season_overview(self, series_id, refresh=False):
+        return self.seasons.overview(identifier(series_id), refresh=refresh)
+
     def comments(self, series_id, episode, cursor=0):
         sid = identifier(series_id)
         if not 1 <= number(episode) <= 100000 or not 0 <= number(cursor) <= 1000000:
@@ -603,6 +647,19 @@ class Provider:
         value = self.account.public_session()
         return {"loggedIn": bool(value.get("loggedIn")), "uid": str(value.get("uid") or ""),
                 "nickname": str(value.get("userName") or ""), "avatar": "", "mobile": str(value.get("mobile") or "")}
+
+    def _commit_qr_session(self, candidate, origin_identity):
+        with self._write_lock:
+            if origin_identity != self.account._session_identity(self.account.load_session() or {}):
+                raise ProviderError("ACCOUNT_CHANGED", "账号已切换，已取消之前的扫码登录", 409)
+            if not candidate.get("uid") or not (candidate.get("cookie") or candidate.get("token")):
+                raise QrLoginError("QR_MOBILE_SESSION_UNAVAILABLE", "扫码账号暂时无法连接手机数据，请重试")
+            self.account.save_session(candidate)
+            self.account.clear_mfa()
+            self.cache.clear()
+            self.seasons.clear()
+            self._last_progress.clear()
+            return self.session()
 
     def _require_login(self):
         session = self.session()
@@ -1031,6 +1088,83 @@ class Provider:
             return None
         return value
 
+    def _compatible_tracks(self, vid, tracks, cancelled):
+        def compatible(rows):
+            return [track for track in rows if isinstance(track, dict)
+                    and str((track.get("video_meta") or {}).get("codec_type") or "hevc").lower() in CODECS]
+
+        supported = compatible(tracks)
+        if supported:
+            return supported
+        endpoint = None
+        for track in tracks:
+            value = track.get("_hq_fallback_api") if isinstance(track, dict) else None
+            if isinstance(value, dict):
+                value = value.get("fallback_api")
+            try:
+                value = self._media_url(value)
+                parsed = urlsplit(value) if value else None
+            except ValueError:
+                continue
+            if parsed and (parsed.hostname == "snssdk.com" or parsed.hostname.endswith(".snssdk.com")
+                           or parsed.hostname == "bytedance.com" or parsed.hostname.endswith(".bytedance.com")):
+                # The model pins ByteVC2 file IDs. Request the official HEVC
+                # rendition while retaining its authorization and other flags.
+                query = [(key, val) for key, val in parse_qsl(parsed.query, keep_blank_values=True)
+                         if key not in {"force_fids", "codec_type"}]
+                query.append(("codec_type", "1"))
+                endpoint = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
+                break
+        if not endpoint:
+            return []
+
+        def read():
+            self._cancel(cancelled)
+            with self.sdk.http_request("GET", endpoint, timeout=(10, 15), allow_redirects=False,
+                                       headers={"Accept": "application/json"}) as response:
+                response.raise_for_status()
+                if response.status_code != 200 or len(response.content) > 1024 * 1024:
+                    raise ValueError("Invalid compatible playback response")
+                payload = response.json()
+            self._cancel(cancelled)
+            if not isinstance(payload, dict) or payload.get("code") != 0:
+                raise ValueError("Invalid compatible playback model")
+            info = payload.get("video_info")
+            if not isinstance(info, dict) or info.get("code") != 0 or not isinstance(info.get("data"), dict):
+                raise ValueError("Invalid compatible playback model")
+            model = info["data"]
+            rows = model.get("video_list")
+            if isinstance(rows, dict):
+                rows = list(rows.values())
+            if not isinstance(rows, list) or len(rows) > 32:
+                raise ValueError("Invalid compatible playback tracks")
+            normalized = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                meta = row.get("video_meta")
+                encryption = row.get("encrypt_info")
+                if meta is not None and not isinstance(meta, dict) or encryption is not None and not isinstance(encryption, dict):
+                    continue
+                track = {**row, "video_meta": {**{key: row[key] for key in ("definition", "codec_type", "size") if key in row}, **(meta or {})},
+                         "encrypt_info": {**{key: row[key] for key in ("encrypt", "spade_a") if key in row}, **(encryption or {})}}
+                for field in ("main_url", "backup_url_1", "backup_url"):
+                    value = row.get(field)
+                    try:
+                        track[field] = self._media_url(value)
+                        if not track[field] and model.get("key_seed") and value:
+                            track[field] = self._media_url(decode_playback_url(value, model["key_seed"]))
+                    except ValueError:
+                        track[field] = None
+                if any(track[field] for field in ("main_url", "backup_url_1", "backup_url")):
+                    normalized.append(track)
+            supported = compatible(normalized)
+            if not supported:
+                raise ProviderError("MEDIA_CODEC_UNSUPPORTED", "上游暂时没有兼容的播放画质，请稍后重试")
+            return supported
+
+        return self.cache.get(("compatible-tracks", vid), 600, lambda: self._read("取得兼容播放地址", read))
+
     def source(self, series_id, episode, quality="auto", cancelled=None) -> Path:
         sid = identifier(series_id)
         if quality not in QUALITIES:
@@ -1053,7 +1187,7 @@ class Provider:
         encrypted, raw, partial = (self.source_dir / f"{key}.{suffix}" for suffix in ("encrypted.partial", "raw.partial", "ready.partial"))
         try:
             tracks = self._read("取得播放地址", lambda: self.sdk.get_video_tracks([target["vid"]]).get(target["vid"]) or [])
-            tracks = [track for track in tracks if str((track.get("video_meta") or {}).get("codec_type") or "hevc").lower() in CODECS]
+            tracks = self._compatible_tracks(target["vid"], tracks, cancelled)
             if not tracks:
                 raise ProviderError("MEDIA_CODEC_UNSUPPORTED", "上游暂时没有兼容的播放画质，请稍后重试")
             def resolution(track):
@@ -1150,6 +1284,8 @@ class Provider:
 
     def close(self):
         self._closed.set()
+        self.qr_login.close()
+        self.seasons.clear()
         self.catalog_cache.close()
         with self._source_guard:
             self._source_guard.notify_all()

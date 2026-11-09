@@ -2,12 +2,15 @@ export type Genre = 'short_play' | 'comic_series' | 'ai_series';
 export interface Series { id: string; title: string; cover: string; intro: string; totalEpisodes: number; tags: string[]; actors: string[]; score?: string; }
 export interface Episode { index: number; vid: string; title: string; duration?: number; }
 export interface SeriesDetail { series: Series; episodes: Episode[]; }
+export interface NextSeason { seriesId:string; status:'found'|'none'|'ambiguous'; season:number|null; nextSeason:number|null; next:Series|null; source:'official'|'title'|null; firstEpisode:number|null; }
+export interface SeasonOverview {seriesId:string;status:'found'|'single'|'ambiguous';source:'official'|'title'|null;currentSeason:number|null;seasons:{season:number;series:Series}[];}
 export interface HistoryItem { series: Series; episode: number; position: number; duration: number; watchedAt: number; uid: string; }
 export interface Settings { theme: 'dark' | 'light' | 'system'; quality: string; rate: number; autoplay: boolean; volume: number; cacheGB: number; closeToTray: boolean; bossKey: string; danmaku?: import('./danmaku-settings').DanmakuPreferences; }
 export interface Library { history: HistoryItem[]; favorites: Series[]; historyTotal?: number; }
 export interface HistoryQuery { search?: string; period?: 'all' | 'today' | 'week' | 'month'; status?: 'all' | 'unfinished' | 'finished'; cursor?: string; limit?: number; }
 export interface HistoryPage { items: HistoryItem[]; total: number; nextCursor: string | null; }
 export interface Session { loggedIn: boolean; uid: string; nickname: string; avatar: string; mobile: string; }
+export interface QrLoginState {id:string;status:'waiting'|'scanned'|'verifying'|'confirmed'|'expired'|'cancelled'|'failed';expiresAt:number;pollAfter:number;message:string;imageDataUrl?:string;session?:Session;error?:{code:string;message:string};}
 export interface Comment { id: string; text: string; nickname: string; avatar: string; likes: number; time: string; }
 export interface CommentsPage { items: Comment[]; total: number; cursor: number; hasMore: boolean; }
 export interface DanmakuItem { id: string; text: string; time: number; }
