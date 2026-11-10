@@ -8,6 +8,7 @@ still require the immediately following index. No media/account data is retained
 from __future__ import annotations
 
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
 import re
@@ -138,19 +139,37 @@ def _same_cast(current, candidate):
 def _official(meta):
     album = str(meta.get("related_album_id") or "")
     index = _integer(meta.get("season_index"))
-    enabled = meta.get("is_multi_season") in (True, 1, "1", "true")
+    # Some official detail responses omit the switch while retaining album/index.
+    # An explicitly disabled switch must not become an official relation.
+    enabled = "is_multi_season" not in meta or meta.get("is_multi_season") in (True, 1, "1", "true")
     return (album, index) if enabled and _ID.fullmatch(album) and index else None
 
 
-def _metadata(sid, raw):
+def _needs_identity_detail(current, candidate):
+    """Supplement only plausible identity omissions; a title never proves a link."""
+    official = _official(current)
+    if not official or _official(candidate) or not _same_kind(current, candidate, require_known=False):
+        return False
+    if ("is_multi_season" in candidate
+            and candidate["is_multi_season"] not in (True, 1, "1", "true")):
+        return False
+    album = candidate.get("related_album_id") or ""
+    if _ID.fullmatch(album):
+        return album == official[0] and not candidate["season_index"]
+    left, right = parse_season_title(current["title"]), parse_season_title(candidate["title"])
+    return left.safe and right.safe and _base_key(left.base) == _base_key(right.base)
+
+
+def _metadata(sid, raw, *, from_batch=False):
     """Whitelist structural identity fields from the raw mobile response."""
     if not isinstance(raw, dict) or not raw:
         raise SeasonLookupError("剧集季信息暂时不可用")
-    episodes = raw.get("video_list")
-    indexes = {_integer(row.get("vid_index")) for row in episodes if isinstance(row, dict)} if isinstance(episodes, list) else set()
+    episodes = [row for name in ("video_list", "video_list_unique")
+                for row in (raw[name] if isinstance(raw.get(name), list) else []) if isinstance(row, dict)]
+    indexes = {_integer(row.get("vid_index")) for row in episodes}
     indexes.discard(0)
     playable = {_integer(row.get("vid_index")) for row in episodes
-                if isinstance(row, dict) and str(row.get("vid") or "").strip()} if isinstance(episodes, list) else set()
+                if str(row.get("vid") or row.get("video_id") or "").strip()}
     playable.discard(0)
     total = _integer(raw.get("total_episode")) or len(indexes)
     tags = raw.get("tags") or raw.get("category") or re.findall(r'"name"\s*:\s*"([^"]+)"', str(raw.get("category_schema") or ""))
@@ -168,11 +187,14 @@ def _metadata(sid, raw):
     return {"id": sid, "title": str(raw.get("series_title") or raw.get("title") or "")[:200],
             "content_type": raw.get("content_type"), "genre": raw.get("genre"),
             "ai_usage_type": raw.get("ai_usage_type"),
-            "is_multi_season": raw.get("is_multi_season"),
+            **({"is_multi_season": raw["is_multi_season"]} if "is_multi_season" in raw else {}),
             "related_album_id": str(raw.get("related_album_id") or ""),
             "season_index": _integer(raw.get("season_index")),
             "celebrities": [{"nickname": name} for name in _actors(raw)], "series": series,
-            "first_episode": min(playable) if playable else None}
+            "first_episode": min(playable) if playable else None,
+            # A batch may return only preview episode rows. Count them only after
+            # a matched season has been read as a single full-series response.
+            "total_complete": not from_batch or bool(_integer(raw.get("total_episode")))}
 
 
 class SeasonResolver:
@@ -233,9 +255,25 @@ class SeasonResolver:
                 for key in list(self.values):
                     if self.values[key][0] <= now:
                         self.values.pop(key)
-                duration = self.ttl if any(value["status"] == "found" for value in bundle["results"].values()) else self.empty_ttl
+                duration = self.ttl if bundle.get("complete", True) and any(
+                    value["status"] == "found" for value in bundle["results"].values()) else self.empty_ttl
                 expires = deadline if deadline is not None else now + duration
                 if expires > now:
+                    official = _official(bundle["current"])
+                    if official and not bundle["ambiguous"]:
+                        # A verified public album snapshot can be viewed from any
+                        # member without searching and reading every season again.
+                        for number, member in bundle["members"]:
+                            if member["id"] == sid or (_official(member) or (None,))[0] != official[0]:
+                                continue
+                            # Cached public snapshots are copied before reading;
+                            # aliases can share immutable members without storing
+                            # the same large family once per season in memory.
+                            alias = dict(bundle)
+                            alias.update(current=member, index=number,
+                                         safe=parse_season_title(member["title"]).safe, results={})
+                            self.values[member["id"]] = (expires, alias)
+                            self.values.move_to_end(member["id"])
                     self.values[sid] = (expires, deepcopy(bundle))
                     self.values.move_to_end(sid)
                 while len(self.values) > self.capacity:
@@ -259,7 +297,7 @@ class SeasonResolver:
             for sid in batch:
                 entry = data.get(sid)
                 video = entry.get("video_data") if isinstance(entry, dict) else None
-                result[sid] = _metadata(sid, video)
+                result[sid] = _metadata(sid, video, from_batch=len(batch) > 1)
         return result
 
     def _search(self, query):
@@ -267,50 +305,91 @@ class SeasonResolver:
         # title once and let _collect validate all candidates against the album.
         # Import here because public search reuses this module's title parser.
         from search import fallback_query
-        return self._search_query(fallback_query(query) or query)
+        discovery = fallback_query(query) or query
+        # Question-and-subtitle titles behave like colon subtitles upstream.
+        # A terminal grammatical particle can hide the related search family;
+        # dropping it changes discovery only, never the official album check.
+        split = re.split(r"[？?]", discovery, maxsplit=1)
+        if len(split) == 2 and split[1].strip() and len(split[0].strip()) >= 3:
+            discovery = split[0].strip()
+            if discovery.endswith("的"):
+                discovery = discovery[:-1]
+        return self._search_query(discovery, family_base=query)
 
-    def _search_query(self, query):
+    def _search_query(self, query, *, family_base=""):
+        from search import SearchRows
         results, seen = [], set()
         offset, passback, search_id = 0, "", ""
-        for _ in range(4):
+        cursors = {("0", "", "")}
+        family = _base_key(parse_season_title(family_base).base) if family_base else ""
+        matched_family, empty_family_pages = False, 0
+        complete = True
+        for _ in range(12):
             params = {"query": query, "tab_name": "feed", "search_source": "1", "offset": str(offset),
                       "count": "0", "use_correct": "false"}
             if passback:
                 params["passback"] = passback
             if search_id:
                 params["search_id"] = search_id
-            raw = self.sdk.api("GET", "/reading/bookapi/search/tab/v", extra_query=params)
-            tabs = raw.get("search_tabs") if isinstance(raw, dict) else None
-            if not isinstance(tabs, list):
-                raise SeasonLookupError("下一季搜索结果暂时不可用")
-            if not tabs:
+            try:
+                raw = self.sdk.api("GET", "/reading/bookapi/search/tab/v", extra_query=params)
+                tabs = raw.get("search_tabs") if isinstance(raw, dict) else None
+                if not isinstance(tabs, list):
+                    raise SeasonLookupError("下一季搜索结果暂时不可用")
+                if not tabs:
+                    break
+                tab = tabs[0]
+                rows = tab.get("data") if isinstance(tab, dict) else None
+                if not isinstance(rows, list):
+                    raise SeasonLookupError("下一季搜索结果暂时不可用")
+            except Exception:
+                if not results:
+                    raise
+                complete = False
                 break
-            tab = tabs[0]
-            rows = tab.get("data") if isinstance(tab, dict) else None
-            if not isinstance(rows, list):
-                raise SeasonLookupError("下一季搜索结果暂时不可用")
+            family_in_page = 0
             for cell in rows:
                 if not isinstance(cell, dict):
+                    complete = False
                     continue
-                item = self.sdk._parse_search_cell(cell)
+                try:
+                    item = self.sdk._parse_search_cell(cell)
+                except (TypeError, ValueError, AttributeError):
+                    complete = False
+                    continue
                 if not item:
                     continue
+                if family and _base_key(parse_season_title(item.get("title")).base) == family:
+                    family_in_page += 1
                 sid = str(item.get("series_id") or "")
                 if not _ID.fullmatch(sid) or sid in seen:
                     continue
                 seen.add(sid)
                 results.append({"id": sid, "title": str(item.get("title") or "")[:200]})
-                if len(results) == 40:
-                    return results
-            if not tab.get("has_more") or not rows:
+                if len(results) == 128:
+                    return SearchRows(results, complete=False)
+            if not tab.get("has_more"):
+                break
+            matched_family = matched_family or family_in_page > 0
+            empty_family_pages = 0 if family_in_page else empty_family_pages + 1
+            if not rows or matched_family and empty_family_pages >= 2:
+                complete = False
                 break
             next_offset = tab.get("next_offset")
             next_passback = tab.get("passback") or passback
-            if next_offset is None or (str(next_offset) == str(offset) and next_passback == passback):
-                raise SeasonLookupError("下一季搜索分页暂时不可用")
+            next_search_id = tab.get("search_id") or search_id
+            cursor = (str(next_offset), str(next_passback), str(next_search_id))
+            if next_offset is None or cursor in cursors:
+                if not results:
+                    raise SeasonLookupError("下一季搜索分页暂时不可用")
+                complete = False
+                break
+            cursors.add(cursor)
             offset, passback = next_offset, next_passback
-            search_id = tab.get("search_id") or search_id
-        return results
+            search_id = next_search_id
+        else:
+            complete = False
+        return SearchRows(results, complete=complete)
 
     @staticmethod
     def _result(sid, index, status="none", *, next_series=None, next_index=None, source=None, first_episode=None):
@@ -324,33 +403,68 @@ class SeasonResolver:
         index = official[1] if official else title.index
         bundle = {"current": current, "index": index, "safe": title.safe,
                   "source": "official" if official else "title", "members": [(index, current)],
-                  "ambiguous": False, "details": {}, "results": {}}
+                  "ambiguous": False, "details": {}, "results": {}, "complete": True}
         if not title.safe or not 1 <= len(title.base) <= 80:
             return bundle
-        discovered = [row for row in self._search(title.base) if row["id"] != sid]
+        search = self._search(title.base)
+        bundle["complete"] = getattr(search, "complete", True)
+        discovered = [row for row in search if row["id"] != sid]
         if not official:
             discovered = [row for row in discovered if (parsed := parse_season_title(row["title"])).safe
                           and _base_key(parsed.base) == _base_key(title.base)]
         if not discovered:
             return bundle
         candidates = self._details([row["id"] for row in discovered])
-        for candidate in candidates.values():
+        def match(candidate):
+            if _needs_identity_detail(current, candidate):
+                candidate = self._details([candidate["id"]])[candidate["id"]]
             parsed = parse_season_title(candidate["title"])
             if not parsed.safe or not _same_kind(current, candidate, require_known=not official):
-                continue
+                return None
             if official:
                 link = _official(candidate)
                 if not link or link[0] != official[0]:
-                    continue
+                    return None
+                if not candidate["total_complete"] or not candidate["series"]["totalEpisodes"]:
+                    candidate = self._details([candidate["id"]])[candidate["id"]]
+                    link = _official(candidate)
+                    if (not link or link[0] != official[0]
+                            or not parse_season_title(candidate["title"]).safe
+                            or not _same_kind(current, candidate, require_known=False)):
+                        return None
                 candidate_index = link[1]
             else:
                 if (_base_key(parsed.base) != _base_key(title.base) or not _same_cast(current, candidate)):
-                    continue
+                    return None
                 # A separately numbered official first season is a remake, not part two.
                 if candidate["season_index"] and candidate["season_index"] != parsed.index:
-                    continue
+                    return None
+                if not candidate["total_complete"]:
+                    candidate = self._details([candidate["id"]])[candidate["id"]]
+                    parsed = parse_season_title(candidate["title"])
+                    if (not parsed.safe or not _same_kind(current, candidate, require_known=True)
+                            or _base_key(parsed.base) != _base_key(title.base)
+                            or not _same_cast(current, candidate)
+                            or candidate["season_index"] and candidate["season_index"] != parsed.index):
+                        return None
                 candidate_index = parsed.index
-            bundle["members"].append((candidate_index, candidate))
+            return candidate_index, candidate
+        if len(candidates) > 8:
+            def isolated_match(candidate):
+                try:
+                    return match(candidate), True
+                except Exception:
+                    # One unavailable season in a large public family must not
+                    # erase other verified members or imply that the gap is gone.
+                    return None, False
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="season-detail") as pool:
+                checked = list(pool.map(isolated_match, candidates.values()))
+            members = [member for member, _ in checked]
+            if any(not ok for _, ok in checked):
+                bundle["complete"] = False
+        else:
+            members = [match(candidate) for candidate in candidates.values()]
+        bundle["members"].extend(member for member in members if member is not None)
         bundle["members"].sort(key=lambda item: item[0])
         indexes = [number for number, _ in bundle["members"]]
         bundle["ambiguous"] = len(indexes) != len(set(indexes))
@@ -360,7 +474,7 @@ class SeasonResolver:
         if target in bundle["details"]:
             return bundle["details"][target]
         member = next((meta for _, meta in bundle["members"] if meta["id"] == target), None)
-        if member is not None and member["first_episode"]:
+        if member is not None and member["first_episode"] and member["series"]["totalEpisodes"]:
             result = {"series": deepcopy(member["series"]), "indexes": [member["first_episode"]]}
             bundle["details"][target] = result
             return result
@@ -413,5 +527,8 @@ class SeasonResolver:
         return {"seriesId": sid, "status": status,
                 "source": bundle["source"] if status != "single" else None,
                 "currentSeason": bundle["index"] if bundle["safe"] else None,
+                "complete": bundle.get("complete", True),
+                **({"warning": "关联季仍可能有遗漏，已保留找到的作品，可刷新继续核对"}
+                   if not bundle.get("complete", True) else {}),
                 "seasons": [{"season": number, "series": self._series(member, bundle)}
                             for number, member in members] if bundle["safe"] else []}

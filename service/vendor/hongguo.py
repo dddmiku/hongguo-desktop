@@ -282,42 +282,76 @@ def search(query, max_items=None):
     这里循环翻页累计短剧结果, 直到 has_more=False 或达 max_items / 翻页上限。
     max_items 越小翻页越少越快(单 IP 顺序翻页是单次延迟主因); 默认走 HG_SEARCH_MAX_ITEMS(20)。
     """
+    # Provider search owns the public result contract; importing lazily avoids
+    # coupling module startup to its season-title parser.
+    from search import SearchRows
     if max_items is None:
         max_items = int(os.environ.get('HG_SEARCH_MAX_ITEMS', '20'))
     max_items = max(1, min(max_items, 40))
     ck = SG.cache_key('search', query, max_items)
     cached = SG.cache_get(ck)
     if cached is not None:
-        return cached
+        return SearchRows(cached, complete=getattr(cached, 'complete', True))
     results, seen = ([], set())
     offset, passback, search_id = (0, '', '')
+    cursors = {('0', '', '')}
+    complete = True
     for _ in range(12):
         q = {'query': query, 'tab_name': 'feed', 'search_source': '1', 'offset': str(offset), 'count': '0', 'use_correct': 'true'}
         if passback:
             q['passback'] = passback
         if search_id:
             q['search_id'] = search_id
-        j = api('GET', '/reading/bookapi/search/tab/v', extra_query=q)
-        tabs = j.get('search_tabs') or []
-        if not tabs:
+        try:
+            j = api('GET', '/reading/bookapi/search/tab/v', extra_query=q)
+            tabs = j.get('search_tabs') if isinstance(j, dict) else None
+            if not isinstance(tabs, list):
+                raise RuntimeError('Search response is unavailable')
+            if not tabs:
+                break
+            tab = tabs[0]
+            data = tab.get('data') if isinstance(tab, dict) else None
+            if not isinstance(data, list):
+                raise RuntimeError('Search response is unavailable')
+        except Exception:
+            # A later read failure must not erase the matches already obtained.
+            # Keep the first-page failure visible to Provider's fixed error boundary.
+            if not results:
+                raise
+            complete = False
             break
-        tab = tabs[0]
-        data = tab.get('data') or []
         for cell in data:
-            item = _parse_search_cell(cell)
+            try:
+                item = _parse_search_cell(cell) if isinstance(cell, dict) else None
+                if not isinstance(cell, dict):
+                    complete = False
+            except (AttributeError, TypeError, ValueError):
+                complete = False
+                continue
             if not item or item['series_id'] in seen:
                 continue
             seen.add(item['series_id'])
             results.append(item)
-        nxt = tab.get('next_offset')
-        offset = nxt if nxt is not None else offset
-        passback = tab.get('passback') or passback
-        search_id = tab.get('search_id') or search_id
-        if not tab.get('has_more') or not data or len(results) >= max_items:
+        if not results and not complete:
+            raise RuntimeError('Search response is unavailable')
+        if len(results) >= max_items or not tab.get('has_more'):
             break
-    results = results[:max_items]
-    SG.cache_set(ck, results, ttl=600)
-    return results
+        nxt = tab.get('next_offset')
+        next_offset = nxt if nxt is not None else offset
+        next_passback = tab.get('passback') or passback
+        next_search_id = tab.get('search_id') or search_id
+        cursor = (str(next_offset), str(next_passback), str(next_search_id))
+        if not data or cursor in cursors:
+            complete = False
+            break
+        cursors.add(cursor)
+        offset, passback, search_id = next_offset, next_passback, next_search_id
+    else:
+        complete = False
+    result = SearchRows(results[:max_items], complete=complete)
+    if result.complete:
+        SG.cache_set(ck, result, ttl=600)
+    return result
 
 def _episodes_body(series_id):
     return {'biz_param': {'detail_page_version': 0, 'disable_digg_stat': False, 'disable_video_relate_book': False, 'image_shrink_datas_str': IMAGE_SHRINK, 'need_all_video_definition': False, 'need_mp4_align': False, 'screen_width_px': '900', 'source': 7, 'use_os_player': False, 'use_server_dns': False}, 'series_id': series_id}

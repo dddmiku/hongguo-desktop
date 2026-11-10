@@ -1,6 +1,10 @@
 {
-  "name": "hongguo-desktop", "version": "1.3.1", "private": true,
-  "description": "红果桌面客户端，全新源码架构", "author": "dddmiku", "main": "out/main.cjs",
+  "name": "hongguo-desktop",
+  "version": "1.3.2",
+  "private": true,
+  "description": "红果桌面客户端，全新源码架构",
+  "author": "dddmiku",
+  "main": "out/main.cjs",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
@@ -10,13 +14,80 @@
     "package": "npm run build && electron-builder --win nsis --x64",
     "verify": "npm run typecheck && npm test"
   },
-  "dependencies": { "react": "^19.2.0", "react-dom": "^19.2.0", "lucide-react": "^0.468.0", "hls.js": "^1.6.13" },
-  "devDependencies": { "@types/react": "^19.2.0", "@types/react-dom": "^19.2.0", "@types/node": "^24.10.0", "@vitejs/plugin-react": "^5.1.0", "vite": "^7.2.0", "typescript": "^5.9.3", "electron": "^39.0.0", "electron-builder": "^26.0.12", "esbuild": "^0.25.12", "vitest": "^3.2.4", "@playwright/test": "^1.56.1" },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "lucide-react": "^0.468.0",
+    "hls.js": "^1.6.13"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/node": "^24.10.0",
+    "@vitejs/plugin-react": "^5.1.0",
+    "vite": "^7.2.0",
+    "typescript": "^5.9.3",
+    "electron": "^39.0.0",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.25.12",
+    "vitest": "^3.2.4",
+    "@playwright/test": "^1.56.1"
+  },
   "build": {
-    "appId": "dev.dddmiku.hongguo.desktop", "productName": "红果桌面", "directories": { "output": "release" }, "electronDist": "node_modules/electron/dist",
-    "files": ["out/**", "dist/**", "assets/**", "package.json"],
-    "extraResources": [{ "from": "service", "to": "service", "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc", "!**/tests/**"] }, { "from": "runtime", "to": "runtime", "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc", "!.build/**", "!licenses/*review*.json", "!licenses/*candidate*.json", "!licenses/release-derivation-*.json", "!licenses/application-notices/**", "!licenses/application-dependencies.json", "!licenses/README.txt"] }],
-    "win": { "target": "nsis", "artifactName": "hongguo-${version}-setup.exe", "icon": "assets/icon.ico", "signExecutable": false },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "perMachine": false, "createDesktopShortcut": true, "createStartMenuShortcut": true, "deleteAppDataOnUninstall": false, "include": "build/installer.nsh" }
+    "appId": "dev.dddmiku.hongguo.desktop",
+    "productName": "红果桌面",
+    "directories": {
+      "output": "release"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "files": [
+      "out/**",
+      "dist/**",
+      "assets/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "service",
+        "to": "service",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/tests/**"
+        ]
+      },
+      {
+        "from": "runtime",
+        "to": "runtime",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!.build/**",
+          "!licenses/*review*.json",
+          "!licenses/*candidate*.json",
+          "!licenses/release-derivation-*.json",
+          "!licenses/application-notices/**",
+          "!licenses/application-dependencies.json",
+          "!licenses/README.txt"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "artifactName": "hongguo-${version}-setup.exe",
+      "icon": "assets/icon.ico",
+      "signExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "include": "build/installer.nsh"
+    }
   }
 }

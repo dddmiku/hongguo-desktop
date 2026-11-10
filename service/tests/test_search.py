@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from provider import Provider, ProviderError
-from search import fallback_query, title_key
+from search import SearchRows, fallback_query, title_key
 
 
 BASE = '觉醒伪神'
@@ -138,11 +138,51 @@ class SearchTests(unittest.TestCase):
         self.assertNotIn('warning', second)
         self.assertEqual(self.sdk.search.call_count, 3)
 
-    def test_primary_failure_propagates_and_does_not_trigger_fallback(self):
+    def test_primary_failure_for_short_keyword_has_no_unrelated_fallback(self):
         self.sdk.search.side_effect = RuntimeError('fixed upstream failure')
         with self.assertRaises(ProviderError):
-            self.provider.search(TITLE)
+            self.provider.search(BASE)
         self.sdk.search.assert_called_once()
+
+    def test_failed_full_title_can_use_main_title_and_retry_original_next_time(self):
+        attempts = [0]
+        def fetch(term, **_):
+            if term == TITLE:
+                attempts[0] += 1
+                if attempts[0] == 1:
+                    raise RuntimeError('fixed full-title failure')
+            return family()
+        self.sdk.search.side_effect = fetch
+        first = self.provider.search(TITLE)
+        self.assertEqual(len(first['items']), 8)
+        self.assertIn('warning', first)
+        second = self.provider.search(TITLE)
+        self.assertEqual(len(second['items']), 8)
+        self.assertNotIn('warning', second)
+        self.assertEqual(self.sdk.search.call_count, 3)
+
+    def test_failed_primary_does_not_show_unrelated_main_title_hits_as_success(self):
+        self.sdk.search.side_effect = lambda term, **_: (_ for _ in ()).throw(RuntimeError('fixed failure')) if term == TITLE else [series('99999999', '无关作品')]
+        with self.assertRaises(ProviderError):
+            self.provider.search(TITLE)
+        self.assertEqual(self.sdk.search.call_count, 2)
+
+    def test_failed_primary_and_fallback_preserve_original_timeout(self):
+        import requests
+        self.sdk.search.side_effect = [requests.Timeout('controlled timeout'), RuntimeError('fixed fallback failure')]
+        with self.assertRaises(ProviderError) as caught:
+            self.provider.search(TITLE)
+        self.assertEqual(caught.exception.code, 'UPSTREAM_TIMEOUT')
+
+    def test_incomplete_pages_keep_results_with_warning_and_are_not_cached(self):
+        self.sdk.search.side_effect = [SearchRows(family()[:1], complete=False), family()]
+        first = self.provider.search(BASE)
+        self.assertEqual([row['id'] for row in first['items']], [CURRENT])
+        self.assertIn('warning', first)
+        second = self.provider.search(BASE)
+        self.assertEqual(len(second['items']), 8)
+        self.assertNotIn('warning', second)
+        self.assertEqual(self.sdk.search.call_count, 2)
 
     def test_no_fallback_for_one_character_main_title_or_special_editions(self):
         for title in ('神：另一个标题', TITLE + '番外第二季', TITLE + '新版'):

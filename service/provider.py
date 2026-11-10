@@ -30,7 +30,7 @@ from favorite_sync import set_favorite as reconcile_favorite
 from progress_contract import build_playback_progress_item, build_progress_item, epoch_seconds, mobile_position_seconds
 from source_download import SourceDownloader
 from seasons import SeasonResolver
-from search import search_series
+from search import SearchRows, search_series
 from qr_login import QrLoginManager, QrLoginError
 
 
@@ -184,7 +184,7 @@ class RequestCache:
         self.running = set()
         self.condition = threading.Condition()
 
-    def get(self, key, ttl, loader):
+    def get(self, key, ttl, loader, *, cacheable=None):
         with self.condition:
             while key in self.running:
                 self.condition.wait(timeout=30)
@@ -195,11 +195,12 @@ class RequestCache:
             self.running.add(key)
         try:
             value = loader()
-            with self.condition:
-                self.values[key] = (time.monotonic() + ttl, value)
-                self.values.move_to_end(key)
-                while len(self.values) > self.capacity:
-                    self.values.popitem(last=False)
+            if cacheable is None or cacheable(value):
+                with self.condition:
+                    self.values[key] = (time.monotonic() + ttl, value)
+                    self.values.move_to_end(key)
+                    while len(self.values) > self.capacity:
+                        self.values.popitem(last=False)
             return value
         finally:
             with self.condition:
@@ -483,8 +484,11 @@ class Provider:
         if not 1 <= len(query) <= 80 or any(ord(char) < 32 for char in query):
             raise ProviderError("INPUT_INVALID", "请输入 1–80 个字的剧名", 400)
         def fetch(term):
+            def read():
+                rows = self._read("搜索短剧", lambda: self.sdk.search(term, max_items=40))
+                return SearchRows(self._list(rows), complete=getattr(rows, 'complete', True))
             return self.cache.get(("search", term), 120,
-                lambda: self._read("搜索短剧", lambda: self._list(self.sdk.search(term, max_items=40))))
+                read, cacheable=lambda rows: rows.complete)
         return search_series(query, fetch)
 
     def rank(self, board="hot", genre="short_play"):

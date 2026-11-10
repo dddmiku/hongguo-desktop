@@ -3,6 +3,7 @@ from copy import deepcopy
 from pathlib import Path
 import sys
 import threading
+import time
 import unittest
 from unittest.mock import Mock
 
@@ -52,6 +53,152 @@ class SeasonTests(unittest.TestCase):
         read = Mock(side_effect=lambda label, loader: loader())
         resolver = SeasonResolver(sdk, detail, read, **kwargs)
         return resolver, sdk, detail
+
+    def large_question_family(self, *, recommendation_tail=0, **kwargs):
+        title = "谁说没灵根不能修仙的？之无灵证道"
+        ids = [str(12000000 + number) for number in range(1, 47)]
+        rows = [metadata(sid, title + (str(number) + "季" if number > 1 else ""),
+                         season=number, album=ALBUM, total_episode=number + 77,
+                         video_list=[{"vid_index": 1, "vid": str(22000000 + number)}])
+                for number, sid in enumerate(ids, 1)]
+        extras = [metadata(str(32000000 + number), "无关推荐" + str(number), total_episode=8)
+                  for number in range(recommendation_tail)]
+        resolver, sdk, detail = self.resolver([*rows, *extras], **kwargs)
+        def pages(method, path, **options):
+            if method != "GET":
+                return sdk._api(method, path, **options)
+            params = options["extra_query"]
+            if params["query"] != "谁说没灵根不能修仙":
+                return {"search_tabs": [{"data": [rows[0], rows[-2]], "has_more": False}]}
+            offset = int(params["offset"])
+            size = 6 if offset == 0 else 10
+            candidates = [*rows, *extras]
+            return {"search_tabs": [{"data": deepcopy(candidates[offset:offset + size]),
+                    "has_more": offset + size < len(candidates), "next_offset": offset + size}]}
+        sdk.api.side_effect = pages
+        return resolver, sdk, detail, ids
+
+    def test_question_subtitle_family_discovers_all_46_seasons_beyond_the_old_40_cap(self):
+        resolver, sdk, detail, ids = self.large_question_family()
+        result = resolver.overview(ids[0])
+        self.assertEqual([row["season"] for row in result["seasons"]], list(range(1, 47)))
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["seasons"][0]["series"]["totalEpisodes"], 78)
+        queries = [call.kwargs["extra_query"]["query"] for call in sdk.api.call_args_list if call.args[0] == "GET"]
+        self.assertEqual(set(queries), {"谁说没灵根不能修仙"})
+        self.assertGreater(len(queries), 4)
+        detail.assert_not_called()
+
+    def test_official_family_snapshot_is_reused_from_middle_season_without_requery(self):
+        resolver, sdk, _, ids = self.large_question_family()
+        resolver.overview(ids[0])
+        calls = sdk.api.call_count
+        result = resolver.overview(ids[44])
+        self.assertEqual(result["currentSeason"], 45)
+        self.assertEqual([row["season"] for row in result["seasons"]], list(range(1, 47)))
+        self.assertEqual(resolver.resolve(ids[44])["next"]["id"], ids[45])
+        self.assertEqual(sdk.api.call_count, calls)
+
+    def test_recommendation_tail_stays_partial_with_short_cache_and_refresh(self):
+        now = [100.0]
+        resolver, sdk, _, ids = self.large_question_family(recommendation_tail=100,
+                         ttl=600, empty_ttl=120, clock=lambda: now[0])
+        result = resolver.overview(ids[0])
+        self.assertEqual(len(result["seasons"]), 46)
+        self.assertFalse(result["complete"])
+        self.assertIn("warning", result)
+        self.assertLessEqual(resolver.values[ids[0]][0] - now[0], 120)
+        queries = [call for call in sdk.api.call_args_list if call.args[0] == "GET"]
+        self.assertLess(len(queries), 12)
+        count = sdk.api.call_count
+        middle = resolver.overview(ids[44])
+        self.assertFalse(middle["complete"])
+        self.assertEqual(sdk.api.call_count, count)
+        resolver.overview(ids[0], refresh=True)
+        self.assertGreater(sdk.api.call_count, count)
+
+    def test_large_family_missing_totals_uses_at_most_two_single_series_readers(self):
+        resolver, sdk, _, ids = self.large_question_family()
+        original = sdk.api.side_effect
+        guard = threading.Lock()
+        active, peak = [0], [0]
+        def metadata_reads(method, path, **options):
+            series = options.get("body", {}).get("series_id", "")
+            if method == "POST" and "," in series:
+                result = original(method, path, **options)
+                for entry in result["data"].values():
+                    entry["video_data"].pop("total_episode")
+                return result
+            if method == "POST" and series != ids[0]:
+                with guard:
+                    active[0] += 1
+                    peak[0] = max(peak[0], active[0])
+                try:
+                    time.sleep(.005)
+                    return original(method, path, **options)
+                finally:
+                    with guard:
+                        active[0] -= 1
+            return original(method, path, **options)
+        sdk.api.side_effect = metadata_reads
+        self.assertEqual(len(resolver.overview(ids[0])["seasons"]), 46)
+        self.assertEqual(peak[0], 2)
+        self.assertEqual(active[0], 0)
+
+    def test_large_family_one_metadata_failure_keeps_verified_members_without_skipping_missing_next(self):
+        resolver, sdk, _, ids = self.large_question_family()
+        original = sdk.api.side_effect
+        failing = [True]
+        def unavailable_member(method, path, **options):
+            series = options.get("body", {}).get("series_id", "")
+            if method == "POST" and series == ids[1] and failing[0]:
+                raise SeasonLookupError("固定第二季补读失败")
+            result = original(method, path, **options)
+            if method == "POST" and "," in series:
+                for entry in result["data"].values():
+                    entry["video_data"].pop("total_episode")
+            return result
+        sdk.api.side_effect = unavailable_member
+        overview = resolver.overview(ids[0])
+        self.assertEqual(len(overview["seasons"]), 45)
+        self.assertFalse(overview["complete"])
+        self.assertNotIn(2, [row["season"] for row in overview["seasons"]])
+        following = resolver.resolve(ids[0])
+        self.assertEqual(following["status"], "none")
+        self.assertIsNone(following["next"])
+        failing[0] = False
+        self.assertEqual(len(resolver.overview(ids[0], refresh=True)["seasons"]), 46)
+
+    def test_later_discovery_failure_keeps_known_seasons_partial_and_does_not_invent_a_gap(self):
+        rows = [metadata(CURRENT, "春风", season=1, album=ALBUM, total_episode=12),
+                metadata(THIRD, "春风第三季", season=3, album=ALBUM, total_episode=31)]
+        resolver, sdk, _ = self.resolver(rows)
+        reads = [0]
+        def interrupted(method, path, **options):
+            if method == "GET":
+                reads[0] += 1
+                if reads[0] > 1:
+                    raise SeasonLookupError("固定后页失败")
+                return {"search_tabs": [{"data": deepcopy(rows), "has_more": True, "next_offset": 2}]}
+            return sdk._api(method, path, **options)
+        sdk.api.side_effect = interrupted
+        overview = resolver.overview(CURRENT)
+        self.assertEqual([row["season"] for row in overview["seasons"]], [1, 3])
+        self.assertFalse(overview["complete"])
+        self.assertEqual(resolver.resolve(CURRENT)["status"], "none")
+        self.assertIsNone(resolver.resolve(CURRENT)["next"])
+        sdk.api.side_effect = sdk._api
+        self.assertTrue(resolver.overview(CURRENT, refresh=True)["complete"])
+
+    def test_discovery_candidates_remain_bounded_and_a_cap_is_not_complete(self):
+        resolver, sdk, _, _ = self.large_question_family()
+        many = [metadata(str(42000000 + number), "春风第二季", total_episode=8) for number in range(200)]
+        sdk.api.side_effect = lambda *args, **options: {"search_tabs": [{"data": many, "has_more": True,
+                                                                       "next_offset": 200}]}
+        candidates = resolver._search_query("春风", family_base="春风")
+        self.assertEqual(len(candidates), 128)
+        self.assertFalse(candidates.complete)
+        self.assertEqual(sdk.api.call_count, 1)
 
     def test_chinese_numeric_and_bracket_markers(self):
         for first, second in (("长相思第一季", "长相思第二季"), ("长相思第1季", "长相思第2季"),
@@ -218,16 +365,20 @@ class SeasonTests(unittest.TestCase):
             resolver.resolve(CURRENT)
         self.assertFalse(resolver.values)
 
-    def test_search_pagination_must_progress_and_failures_are_not_cached(self):
+    def test_search_pagination_stall_keeps_partial_information_without_complete_cache(self):
         resolver, sdk, _ = self.resolver([metadata(CURRENT, "春风")])
         def stuck(method, path, **kwargs):
             if method == "GET":
                 return {"search_tabs": [{"data": sdk.search_rows, "has_more": True, "next_offset": 0}]}
             return sdk._api(method, path, **kwargs)
         sdk.api.side_effect = stuck
-        with self.assertRaises(SeasonLookupError):
-            resolver.resolve(CURRENT)
-        self.assertFalse(resolver.values)
+        result = resolver.overview(CURRENT)
+        self.assertFalse(result["complete"])
+        self.assertEqual([row["season"] for row in result["seasons"]], [1])
+        self.assertLessEqual(resolver.values[CURRENT][0] - resolver.clock(), resolver.empty_ttl)
+        self.assertFalse(resolver.values[CURRENT][1]["complete"])
+        sdk.api.side_effect = sdk._api
+        self.assertTrue(resolver.overview(CURRENT, refresh=True)["complete"])
 
     def test_failure_is_not_cached_and_retry_can_recover(self):
         resolver, sdk, _ = self.resolver([metadata(CURRENT, "春风"), metadata(NEXT, "春风第二季")])
@@ -379,6 +530,219 @@ class SeasonTests(unittest.TestCase):
         resolver, _, detail = self.resolver([metadata(CURRENT, "春风", episode_cnt=99,
             video_list=[{"vid_index": 1}, {"vid_index": 2}, {"vid_index": 2}, {"vid_index": 3}])])
         self.assertEqual(resolver.overview(CURRENT)["seasons"][0]["series"]["totalEpisodes"], 3)
+        detail.assert_not_called()
+
+    def test_actual_schema_without_multiseason_flag_keeps_official_relation(self):
+        rows = [metadata(CURRENT, "家里家外", season=1, album=ALBUM, actors=(), total_episode=79,
+                         video_list=[{"vid_index": 1, "vid": "11111111"}]),
+                metadata(NEXT, "家里家外2", season=2, album=ALBUM, actors=(), total_episode=111,
+                         video_list=[{"vid_index": 1, "vid": "22222222"}])]
+        for row in rows:
+            row.pop("is_multi_season")
+        resolver, _, detail = self.resolver(rows)
+        result = resolver.overview(CURRENT)
+        self.assertEqual((result["status"], result["source"]), ("found", "official"))
+        self.assertEqual([row["series"]["totalEpisodes"] for row in result["seasons"]], [79, 111])
+        self.assertEqual(resolver.resolve(CURRENT)["next"]["id"], NEXT)
+        detail.assert_not_called()
+
+    def test_metadata_only_batch_supplements_missing_identity_for_title_family_only(self):
+        rows = [metadata(CURRENT, "家里家外", season=1, album=ALBUM, total_episode=79,
+                         video_list=[{"vid_index": 1, "vid": "11111111"}]),
+                metadata(NEXT, "家里家外2", season=2, album=ALBUM, total_episode=111,
+                         video_list=[{"vid_index": 1, "vid": "22222222"}]),
+                metadata(OTHER, "无关作品", season=2, album="111111111", total_episode=8)]
+        resolver, sdk, detail = self.resolver(rows)
+        def partial(method, path, **kwargs):
+            result = sdk._api(method, path, **kwargs)
+            if method == "POST" and "," in kwargs["body"]["series_id"]:
+                for entry in result["data"].values():
+                    video = entry["video_data"]
+                    for field in ("related_album_id", "season_index", "video_list", "total_episode"):
+                        video.pop(field, None)
+            return result
+        sdk.api.side_effect = partial
+        result = resolver.overview(CURRENT)
+        self.assertEqual([row["series"]["id"] for row in result["seasons"]], [CURRENT, NEXT])
+        self.assertEqual([row["series"]["totalEpisodes"] for row in result["seasons"]], [79, 111])
+        self.assertEqual(resolver.resolve(CURRENT)["next"]["id"], NEXT)
+        single_ids = [call.kwargs["body"]["series_id"] for call in sdk.api.call_args_list
+                      if call.args[0] == "POST" and "," not in call.kwargs["body"]["series_id"]]
+        self.assertEqual(single_ids, [CURRENT, NEXT])
+        detail.assert_not_called()
+
+    def test_missing_batch_total_does_not_use_one_playable_row_as_total(self):
+        rows = [metadata(CURRENT, "家里家外", season=1, album=ALBUM, total_episode=79),
+                metadata(NEXT, "家里家外2", season=2, album=ALBUM, total_episode=111)]
+        resolver, sdk, detail = self.resolver(rows)
+        def partial(method, path, **kwargs):
+            result = sdk._api(method, path, **kwargs)
+            if method == "POST" and kwargs["body"]["series_id"] == NEXT:
+                result["data"][NEXT]["video_data"]["video_list"] = [{"vid_index": 1, "vid": "22222222"}]
+            elif method == "POST" and "," in kwargs["body"]["series_id"]:
+                result["data"][NEXT]["video_data"].pop("total_episode")
+            return result
+        sdk.search_rows.append(metadata(OTHER, "无关作品"))
+        sdk.values[OTHER] = sdk.search_rows[-1]
+        sdk.api.side_effect = partial
+        result = resolver.overview(CURRENT)
+        self.assertEqual(result["seasons"][1]["series"]["totalEpisodes"], 111)
+        detail.assert_not_called()
+
+    def test_partial_batch_first_episode_is_not_cached_as_the_season_total(self):
+        rows = [metadata(CURRENT, "家里家外", season=1, album=ALBUM, total_episode=79),
+                metadata(NEXT, "家里家外2", season=2, album=ALBUM, total_episode=111,
+                         video_list=[{"vid_index": 1, "vid": "22222222"}]),
+                metadata(OTHER, "无关作品", season=2, album="111111111", total_episode=8)]
+        resolver, sdk, detail = self.resolver(rows)
+        def partial(method, path, **kwargs):
+            result = sdk._api(method, path, **kwargs)
+            if method == "POST" and "," in kwargs["body"]["series_id"]:
+                for entry in result["data"].values():
+                    entry["video_data"].pop("total_episode", None)
+                result["data"][NEXT]["video_data"]["video_list"] = [{"vid_index": 1, "vid": "22222222"}]
+            return result
+        sdk.api.side_effect = partial
+        first = resolver.overview(CURRENT)
+        self.assertEqual(first["seasons"][1]["series"]["totalEpisodes"], 111)
+        self.assertEqual(resolver.resolve(CURRENT)["next"]["totalEpisodes"], 111)
+        self.assertEqual(resolver.overview(CURRENT)["seasons"][1]["series"]["totalEpisodes"], 111)
+        single_ids = [call.kwargs["body"]["series_id"] for call in sdk.api.call_args_list
+                      if call.args[0] == "POST" and "," not in call.kwargs["body"]["series_id"]]
+        self.assertEqual(single_ids, [CURRENT, NEXT])
+        detail.assert_not_called()
+
+    def test_partial_batch_can_use_complete_single_series_video_list_when_total_is_absent(self):
+        complete_episodes = [{"vid_index": number, "vid": str(22000000 + number)} for number in range(1, 112)]
+        rows = [metadata(CURRENT, "家里家外", season=1, album=ALBUM, total_episode=79),
+                metadata(NEXT, "家里家外2", season=2, album=ALBUM, video_list=complete_episodes),
+                metadata(OTHER, "无关作品", total_episode=8)]
+        resolver, sdk, detail = self.resolver(rows)
+        def partial(method, path, **kwargs):
+            result = sdk._api(method, path, **kwargs)
+            if method == "POST" and "," in kwargs["body"]["series_id"]:
+                result["data"][NEXT]["video_data"]["video_list"] = complete_episodes[:1]
+            return result
+        sdk.api.side_effect = partial
+        result = resolver.overview(CURRENT)
+        self.assertEqual(result["seasons"][1]["series"]["totalEpisodes"], 111)
+        self.assertEqual(resolver.resolve(CURRENT)["firstEpisode"], 1)
+        self.assertEqual(sum(call.args[0] == "POST" and call.kwargs["body"]["series_id"] == NEXT
+                             for call in sdk.api.call_args_list), 1)
+        detail.assert_not_called()
+
+    def test_partial_batch_count_supplement_failure_is_retryable_and_not_cached(self):
+        rows = [metadata(CURRENT, "家里家外", season=1, album=ALBUM, total_episode=79),
+                metadata(NEXT, "家里家外2", season=2, album=ALBUM, total_episode=111),
+                metadata(OTHER, "无关作品", total_episode=8)]
+        resolver, sdk, _ = self.resolver(rows)
+        failing = [True]
+        def partial(method, path, **kwargs):
+            ids = kwargs.get("body", {}).get("series_id", "")
+            if method == "POST" and ids == NEXT and failing[0]:
+                raise SeasonLookupError("固定总集数补读失败")
+            result = sdk._api(method, path, **kwargs)
+            if method == "POST" and "," in ids:
+                video = result["data"][NEXT]["video_data"]
+                video.pop("total_episode")
+                video["video_list"] = [{"vid_index": 1, "vid": "22222222"}]
+            return result
+        sdk.api.side_effect = partial
+        with self.assertRaises(SeasonLookupError):
+            resolver.overview(CURRENT)
+        self.assertFalse(resolver.values)
+        failing[0] = False
+        self.assertEqual(resolver.overview(CURRENT)["seasons"][1]["series"]["totalEpisodes"], 111)
+
+    def test_title_matched_season_also_supplements_partial_batch_count_without_reading_wrong_cast(self):
+        complete_episodes = [{"vid_index": number, "vid": str(22000000 + number)} for number in range(1, 112)]
+        rows = [metadata(CURRENT, "春风", total_episode=12),
+                metadata(NEXT, "春风第二季", video_list=complete_episodes),
+                metadata(OTHER, "春风第三季", actors=("丙", "丁"), total_episode=8)]
+        resolver, sdk, detail = self.resolver(rows)
+        def partial(method, path, **kwargs):
+            result = sdk._api(method, path, **kwargs)
+            if method == "POST" and "," in kwargs["body"]["series_id"]:
+                result["data"][NEXT]["video_data"]["video_list"] = complete_episodes[:1]
+            return result
+        sdk.api.side_effect = partial
+        result = resolver.overview(CURRENT)
+        self.assertEqual(result["source"], "title")
+        self.assertEqual([row["series"]["totalEpisodes"] for row in result["seasons"]], [12, 111])
+        single_ids = [call.kwargs["body"]["series_id"] for call in sdk.api.call_args_list
+                      if call.args[0] == "POST" and "," not in call.kwargs["body"]["series_id"]]
+        self.assertEqual(single_ids, [CURRENT, NEXT])
+        detail.assert_not_called()
+
+    def test_unique_video_list_supplies_true_count_and_playable_first(self):
+        resolver, _, detail = self.resolver([metadata(CURRENT, "家里家外", episode_cnt=99,
+            video_list_unique=[{"vid_index": 1, "vid": "11111111"}, {"vid_index": 2, "vid": "22222222"},
+                               {"vid_index": 2, "vid": "22222222"}, {"vid_index": 0, "vid": "33333333"}])])
+        self.assertEqual(resolver.overview(CURRENT)["seasons"][0]["series"]["totalEpisodes"], 2)
+        detail.assert_not_called()
+
+    def test_identity_supplement_failure_is_not_cached_and_retry_recovers(self):
+        rows = [metadata(CURRENT, "家里家外", season=1, album=ALBUM, total_episode=79),
+                metadata(NEXT, "家里家外2", season=2, album=ALBUM, total_episode=111),
+                metadata(OTHER, "无关作品", season=2, album="111111111", total_episode=8)]
+        resolver, sdk, _ = self.resolver(rows)
+        failing = [True]
+        def partial(method, path, **kwargs):
+            if method == "POST" and kwargs["body"]["series_id"] == NEXT and failing[0]:
+                raise SeasonLookupError("固定单剧补读失败")
+            result = sdk._api(method, path, **kwargs)
+            if method == "POST" and "," in kwargs["body"]["series_id"]:
+                video = result["data"][NEXT]["video_data"]
+                video.pop("related_album_id")
+                video.pop("season_index")
+            return result
+        sdk.api.side_effect = partial
+        with self.assertRaises(SeasonLookupError):
+            resolver.overview(CURRENT)
+        self.assertFalse(resolver.values)
+        failing[0] = False
+        self.assertEqual(resolver.overview(CURRENT)["status"], "found")
+
+    def test_identity_supplement_still_requires_official_album_and_respects_disabled_flag(self):
+        for disabled in (False, True):
+            rows = [metadata(CURRENT, "家里家外", season=1, album=ALBUM, total_episode=79),
+                    metadata(NEXT, "家里家外2", season=2, album="111111111", total_episode=111),
+                    metadata(OTHER, "无关作品", total_episode=8)]
+            resolver, sdk, _ = self.resolver(rows)
+            def partial(method, path, **kwargs):
+                result = sdk._api(method, path, **kwargs)
+                if method == "POST" and "," in kwargs["body"]["series_id"]:
+                    video = result["data"][NEXT]["video_data"]
+                    video.pop("related_album_id")
+                    video.pop("season_index")
+                    if disabled:
+                        video["is_multi_season"] = False
+                return result
+            sdk.api.side_effect = partial
+            self.assertEqual(resolver.overview(CURRENT)["status"], "single")
+            self.assertIsNone(resolver.resolve(CURRENT)["next"])
+            next_reads = [call for call in sdk.api.call_args_list if call.args[0] == "POST"
+                          and call.kwargs["body"]["series_id"] == NEXT]
+            self.assertEqual(len(next_reads), 0 if disabled else 1)
+
+    def test_known_album_missing_index_supplements_renamed_candidate(self):
+        rows = [metadata(CURRENT, "家里家外", season=1, album=ALBUM, total_episode=79),
+                metadata(NEXT, "改名的新季", season=2, album=ALBUM, total_episode=111),
+                metadata(OTHER, "无关作品", total_episode=8)]
+        resolver, sdk, _ = self.resolver(rows)
+        def partial(method, path, **kwargs):
+            result = sdk._api(method, path, **kwargs)
+            if method == "POST" and "," in kwargs["body"]["series_id"]:
+                result["data"][NEXT]["video_data"].pop("season_index")
+            return result
+        sdk.api.side_effect = partial
+        result = resolver.overview(CURRENT)
+        self.assertEqual([row["series"]["id"] for row in result["seasons"]], [CURRENT, NEXT])
+
+    def test_null_primary_video_list_can_use_unique_list(self):
+        resolver, _, detail = self.resolver([metadata(CURRENT, "家里家外", video_list=None,
+            video_list_unique=[{"vid_index": 1, "vid": "11111111"}])])
+        self.assertEqual(resolver.overview(CURRENT)["seasons"][0]["series"]["totalEpisodes"], 1)
         detail.assert_not_called()
 
     def test_overview_and_resolve_reuse_official_metadata_playability_without_second_detail(self):

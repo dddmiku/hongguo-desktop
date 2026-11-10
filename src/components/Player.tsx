@@ -26,7 +26,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
   const videos = useRef<(HTMLVideoElement | null)[]>([null, null]), playbackLayout = useRef<HTMLDivElement>(null);
   const switcher = useRef<SeamlessSwitcher<VideoDeck> | null>(null), fullscreenBusy = useRef(false), clickTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined), hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const closed = useRef(false), visible = useRef(isActive), shouldPlay = useRef(true), automaticSwitch = useRef(false), lastSaved = useRef(0), mounted = useRef(false);
-  const resumeAfterNavigation=useRef(false),windowVisible=useRef(true),compatible=useRef(false);
+  const windowVisible=useRef(true),compatible=useRef(false),interruptedTarget=useRef<PlaybackTarget|null>(null);
   const latest = useRef({ detail, settings, onSettings, onLibrary, onClose, isActive,onSeries,accountKey }); latest.current = { detail, settings, onSettings, onLibrary, onClose, isActive,onSeries,accountKey };
   const mutedRef = useRef(false), requested = useRef<PlaybackTarget | null>(null),retryTarget=useRef<PlaybackTarget|null>(null);
   const episodeDurations=useRef(new Map<string,number>());
@@ -133,7 +133,8 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     rememberDetail(data);
     requested.current = next;retryTarget.current=null; automaticSwitch.current = automatic;
     setPendingPosition(displayed?.target.seriesId===next.seriesId&&displayed.target.episode===index&&Math.abs(start-displayed.video.currentTime)>.15?start:null);
-    shouldPlay.current = automatic?shouldPlay.current:keepPaused ? !current()?.video.paused : true;
+    // Hidden windows pause the decoder without changing the user's play/pause choice.
+    if(!automatic&&!keepPaused)shouldPlay.current=true;
     if (current()) { void saveDeck(current()); current()?.video.pause(); }
     setPendingEpisode(index); setError(''); if (!current()) setPhase('准备播放'); if (!automatic) hide();
     try {
@@ -181,6 +182,30 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     }finally{if(seasonTransition.current===transition){seasonTransition.current=null;setContinuing(false);if(current()===original&&!requested.current){setPhase('本季播放完毕');setChrome(true);}}}
   },[lookupSeason,selectMedia,saveDeck]);
   const advance=useCallback(()=>{if(requested.current&&requested.current.seriesId!==latest.current.detail.series.id)return;const next=nextEpisode()+1;if(latest.current.detail.episodes.some(item=>item.index===next))void selectEpisode(next);else if(current()&&isLast(current()!))void continueSeason(false);},[selectEpisode,continueSeason]);
+  const suspendPlayback=useCallback(()=>{
+    const deck=current();
+    if(!deck&&requested.current)interruptedTarget.current={...requested.current};
+    cancelSeasonPick();seasonTransition.current=null;setContinuing(false);
+    void saveDeck(deck);deck?.video.pause();deck?.hls?.stopLoad();
+    switcher.current?.cancelPending();mediaPreload(window.hongguo).clear();
+    requested.current=null;setPendingEpisode(null);setPendingPosition(null);automaticSwitch.current=false;
+    clearTimeout(hideTimer.current);
+  },[cancelSeasonPick,saveDeck]);
+  const resumePlayback=useCallback(()=>{
+    if(!visible.current||closed.current)return;
+    const deck=current();
+    if(deck){
+      interruptedTarget.current=null;
+      if(deck.target.quality!==latest.current.settings.quality){void selectEpisode(deck.target.episode,false,deck.video.currentTime,true);return;}
+      applySound(deck);deck.hls?.startLoad(deck.video.currentTime);scheduleNext(deck);
+      if(shouldPlay.current)void deck.video.play().catch(()=>{if(current()===deck){setPhase('点击开始播放');setChrome(true);}});
+      else deck.video.pause();
+    }else if(mounted.current&&!requested.current){
+      const wanted=interruptedTarget.current;interruptedTarget.current=null;
+      const data=wanted?metadata.current.get(wanted.seriesId):latest.current.detail;
+      if(data)void selectMedia(data,wanted?.episode??initialEpisode,false,wanted?.start??initialPosition,true);
+    }
+  },[scheduleNext,selectEpisode,selectMedia,initialEpisode,initialPosition]);
   useEffect(() => {
 
     mounted.current = true; closed.current = false;
@@ -213,7 +238,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     return () => { mounted.current = false; closed.current = true;seasonPick.current=null;continuation.current?.reset();seasonGeneration.current++;mediaPreload(window.hongguo).clear(); clearTimeout(clickTimer.current); clearTimeout(hideTimer.current); void saveDeck(controller.current); void controller.close(); };
   }, [starting, hide, selectEpisode, saveDeck,resetSeason]);
   const lastAccount=useRef(accountKey);
-  useEffect(()=>{if(lastAccount.current===accountKey)return;lastAccount.current=accountKey;cancelSeasonPick();resetSeason(latest.current.detail.series.id);switcher.current?.cancelPending();requested.current=null;setPendingEpisode(null);setPendingPosition(null);shouldPlay.current=false;resumeAfterNavigation.current=false;current()?.video.pause();completion.current.reset();},[accountKey,resetSeason,cancelSeasonPick]);
+  useEffect(()=>{if(lastAccount.current===accountKey)return;lastAccount.current=accountKey;cancelSeasonPick();resetSeason(latest.current.detail.series.id);switcher.current?.cancelPending();requested.current=null;interruptedTarget.current=null;setPendingEpisode(null);setPendingPosition(null);shouldPlay.current=false;current()?.video.pause();completion.current.reset();},[accountKey,resetSeason,cancelSeasonPick]);
   useEffect(() => {
     const deck = current(); if (!deck) return;
     if(!isActive)return;
@@ -223,18 +248,8 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
   useEffect(()=>{if(!settings.autoplay&&seasonTransition.current?.automatic){shouldPlay.current=false;switcher.current?.cancelPending();requested.current=null;setPendingEpisode(null);setPendingPosition(null);setChrome(true);}},[settings.autoplay]);
   useEffect(() => {
     visible.current=isActive&&windowVisible.current;
-    const deck=current();
-    if(!isActive){
-      cancelSeasonPick();
-      resumeAfterNavigation.current=deck?!deck.video.paused:shouldPlay.current;
-      shouldPlay.current=false;void saveDeck(deck);deck?.video.pause();deck?.hls?.stopLoad();switcher.current?.cancelPending();mediaPreload(window.hongguo).clear();
-      requested.current=null;setPendingEpisode(null);setPendingPosition(null);clearTimeout(hideTimer.current);
-    }else if(deck){
-      shouldPlay.current=resumeAfterNavigation.current||shouldPlay.current;
-      deck.hls?.startLoad(deck.video.currentTime);scheduleNext(deck);
-      if(shouldPlay.current&&visible.current)void deck.video.play().catch(()=>{});
-    }else if(mounted.current&&!requested.current){shouldPlay.current=resumeAfterNavigation.current;void selectEpisode(initialEpisode,false,initialPosition);}
-  },[isActive,saveDeck,scheduleNext,selectEpisode,initialEpisode,initialPosition,cancelSeasonPick]);
+    if(!isActive)suspendPlayback();else resumePlayback();
+  },[isActive,suspendPlayback,resumePlayback]);
   const toggleFullscreen = useCallback(async () => {
     const layout = playbackLayout.current; if (!layout || fullscreenBusy.current) return; fullscreenBusy.current = true;
     try { if (document.fullscreenElement === layout) await document.exitFullscreen(); else await layout.requestFullscreen(); hide(); }
@@ -248,7 +263,10 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     const deck = current(); if (!deck || error) return;
     shouldPlay.current = nextPlay; if (shouldPlay.current && visible.current) {deckAccounts.current.set(deck,latest.current.accountKey);completion.current.reset(); applySound(deck);if(!requested.current&&!seasonTransition.current)void deck.video.play().catch(() => {});scheduleNext(deck); } else deck.video.pause();setPlaying(shouldPlay.current&&!deck.video.paused); hide();
   }, [error, hide,scheduleNext,cancelSeasonPick]);
-  useEffect(() => window.hongguo.onVisibility(value => { windowVisible.current=value;visible.current = value&&latest.current.isActive; if (!value) { cancelSeasonPick();shouldPlay.current = false;resumeAfterNavigation.current=false; void save(); current()?.video.pause();current()?.hls?.stopLoad();switcher.current?.cancelPending();mediaPreload(window.hongguo).clear(); }else if(latest.current.isActive){const deck=current();deck?.hls?.startLoad(deck.video.currentTime);if(deck)scheduleNext(deck);} }), [save,scheduleNext,cancelSeasonPick]);
+  useEffect(() => window.hongguo.onVisibility(value => {
+    windowVisible.current=value;visible.current=value&&latest.current.isActive;
+    if(!value)suspendPlayback();else resumePlayback();
+  }),[suspendPlayback,resumePlayback]);
   useEffect(() => window.hongguo.onShutdown(save), [save]);
   const seekTo=useCallback((value:number)=>{const deck=current();if(!deck||!knownDuration(deck.duration))return;
     cancelSeasonPick();

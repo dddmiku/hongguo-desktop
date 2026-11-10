@@ -3,7 +3,7 @@ export interface Series { id: string; title: string; cover: string; intro: strin
 export interface Episode { index: number; vid: string; title: string; duration?: number; }
 export interface SeriesDetail { series: Series; episodes: Episode[]; }
 export interface NextSeason { seriesId:string; status:'found'|'none'|'ambiguous'; season:number|null; nextSeason:number|null; next:Series|null; source:'official'|'title'|null; firstEpisode:number|null; }
-export interface SeasonOverview {seriesId:string;status:'found'|'single'|'ambiguous';source:'official'|'title'|null;currentSeason:number|null;seasons:{season:number;series:Series}[];}
+export interface SeasonOverview {seriesId:string;status:'found'|'single'|'ambiguous';source:'official'|'title'|null;currentSeason:number|null;seasons:{season:number;series:Series}[];complete?:boolean;warning?:string;}
 export interface HistoryItem { series: Series; episode: number; position: number; duration: number; watchedAt: number; uid: string; }
 export interface Settings { theme: 'dark' | 'light' | 'system'; quality: string; rate: number; autoplay: boolean; volume: number; cacheGB: number; closeToTray: boolean; bossKey: string; danmaku?: import('./danmaku-settings').DanmakuPreferences; }
 export interface Library { history: HistoryItem[]; favorites: Series[]; historyTotal?: number; }

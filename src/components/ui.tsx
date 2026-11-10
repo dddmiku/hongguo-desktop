@@ -2,7 +2,12 @@ import { AlertCircle, Check, LoaderCircle, RefreshCw, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-export const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+export const message = (error: unknown) => {
+  let text=error instanceof Error?error.message:String(error);
+  const remote=/^Error invoking remote method (?:'[^'\r\n]+'|"[^"\r\n]+"):\s*/;
+  while(remote.test(text))text=text.replace(remote,'').replace(/^(?:Error|[A-Za-z]+Error):\s*/,'');
+  return text;
+};
 export const bytes = (value: number) => value >= 1024 ** 3 ? `${(value / 1024 ** 3).toFixed(1)} GB` : `${(value / 1024 ** 2).toFixed(1)} MB`;
 
 export function Loading({ text = '正在加载…' }: { text?: string }) {

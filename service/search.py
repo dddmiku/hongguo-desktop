@@ -17,6 +17,13 @@ from seasons import parse_season_title
 LIMIT = 40
 
 
+class SearchRows(list):
+    """Search hits plus completeness; incomplete pages must stay retryable."""
+    def __init__(self, rows=(), *, complete=True):
+        super().__init__(rows)
+        self.complete = bool(complete)
+
+
 def title_key(value):
     """Compare poster/search typography without changing words or season digits."""
     text = unicodedata.normalize('NFKC', str(value or '')).casefold()
@@ -82,15 +89,34 @@ def rank_results(query, rows, *, limit=LIMIT):
 
 def search_series(query, fetch):
     """Fetches are independently cached by the caller; failures remain retryable."""
-    primary = fetch(query)
+    try:
+        primary = fetch(query)
+    except Exception as original:
+        fallback = fallback_query(query)
+        if not fallback:
+            raise
+        try:
+            additional = fetch(fallback)
+        except Exception:
+            raise original from None
+        query_base = title_key(parse_season_title(query).base)
+        rows = [row for row in additional
+                if _related(parse_season_title(row.get('title')), query_base)]
+        if not rows:
+            raise
+        return {'items': rank_results(query, rows),
+                'warning': '完整剧名查询暂时失败，已保留按主标题找到的相关作品，可重试补齐'}
     fallback = fallback_query(query, primary)
-    rows, warning = list(primary), ''
+    rows = list(primary)
+    warning = '' if getattr(primary, 'complete', True) else '后续搜索暂时未完成，已保留找到的作品，可重试补齐'
     if fallback:
         try:
             additional = fetch(fallback)
         except Exception:
             warning = '部分关联季暂时未能补齐，请稍后重试'
         else:
+            if not getattr(additional, 'complete', True):
+                warning = '部分关联季暂时未能补齐，请稍后重试'
             query_base = title_key(parse_season_title(query).base)
             # The broader base query must not introduce unrelated recommendations.
             rows.extend(row for row in additional
