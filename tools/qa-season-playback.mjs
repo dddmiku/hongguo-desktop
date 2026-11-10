@@ -15,7 +15,7 @@ for(const [kind,color] of [['current','blue'],['next','red']]){
   if(result.status!==0)throw new Error('Synthetic HLS generation failed: '+String(result.stderr).slice(-500));
 }
 const fixture=String.raw`
-import React,{useState} from 'react';
+import React,{useEffect,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import Player from '../../src/components/Player';
 import '../../src/styles.css';
@@ -24,7 +24,7 @@ const series=(id,title,totalEpisodes)=>({id,title,totalEpisodes,cover:'',intro:'
 const first={series:series(CURRENT,'测试第一季',3),episodes:[1,2,3].map(index=>({index,vid:String(11000000+index),title:'第'+index+'集',duration:12}))};
 const second={series:series(NEXT,'测试第二季',2),episodes:[1,2].map(index=>({index,vid:String(22000000+index),title:'第'+index+'集',duration:12}))};
 const params=new URLSearchParams(location.search),mode=params.get('mode')||'core',initialEpisode=Number(params.get('episode')||3);
-const data={requests:[],progress:[],favorites:[],seriesEvents:[],favoriteRequests:[],workers:0,peakWorkers:0,lookupWaiting:false,failWaiting:false};
+const data={requests:[],progress:[],favorites:[],seriesEvents:[],favoriteRequests:[],callbacks:[],accountCommitted:'',workers:0,peakWorkers:0,lookupWaiting:false,failWaiting:false};
 window.__qa=data;
 
 const visibility=new Set(),library=new Set();let preferences,patchPreferences,changeAccount,closePlayer,failOnce=mode==='retry';
@@ -34,10 +34,10 @@ const sessions=new Map();let counter=0;
 const getLibrary=()=>({history:data.progress,favorites:data.favorites});
 window.hongguo={
   async request(route,options={}){
-    data.requests.push({route,method:options.method||'GET',body:options.body?structuredClone(options.body):null});
+    data.requests.push({route,method:options.method||'GET',body:options.body?structuredClone(options.body):null,accountCommitted:data.accountCommitted,at:performance.now()});
     const season=/\/catalog\/series\/(\d+)\/next-season/.exec(route);
     if(season){if(season[1]!==CURRENT)return noNext(season[1]);if(mode==='ambiguous')return {...noNext(CURRENT),status:'ambiguous'};
-      if(mode==='slow'){data.lookupWaiting=true;return await new Promise(resolve=>{data.releaseLookup=()=>{data.lookupWaiting=false;resolve(found);};});}return found;}
+      if(mode==='slow'){data.lookupWaiting=true;return await new Promise(resolve=>{data.releaseLookup=()=>{data.callbacks.push({type:'lookup-release',accountCommitted:data.accountCommitted,at:performance.now()});data.lookupWaiting=false;resolve(found);};});}return found;}
     if(route==='/catalog/series/'+NEXT)return second;
     if(route==='/media/session'&&options.method==='POST'){
       if(options.body.seriesId===NEXT&&failOnce){failOnce=false;data.failWaiting=true;await new Promise((_resolve,reject)=>{data.releaseFailure=()=>{data.failWaiting=false;reject(new Error('Synthetic next-season source failure'));};});}
@@ -60,9 +60,10 @@ window.hongguo={
 function Fixture(){
   const [detail,setDetail]=useState(first),[account,setAccount]=useState('fixture-account'),[shown,setShown]=useState(true);
   const [settings,setSettings]=useState({theme:'dark',quality:'1080p',rate:3,autoplay:params.get('autoplay')!=='false',volume:.6,cacheGB:4,closeToTray:false,bossKey:'Ctrl+Shift+B',danmaku:{enabled:true,opacity:.8,fontSize:22,area:.5,density:'standard',blockedWords:[]}});
-  preferences=settings;patchPreferences=patch=>setSettings(current=>({...current,...patch}));changeAccount=setAccount;closePlayer=()=>setShown(false);
+  preferences=settings;patchPreferences=patch=>setSettings(current=>({...current,...patch}));changeAccount=value=>{data.callbacks.push({type:'account-request',account:value,at:performance.now()});setAccount(value);};closePlayer=()=>setShown(false);
+  useEffect(()=>{data.accountCommitted=account;data.callbacks.push({type:'account-committed',account,at:performance.now()});},[account]);
   Object.assign(data,{patch:patchPreferences,changeAccount,hide:()=>visibility.forEach(listener=>listener(false)),show:()=>visibility.forEach(listener=>listener(true)),close:closePlayer});
-  return <div style={{height:'100vh',overflow:'auto',padding:'15px 28px'}}><h1 className="fixture-outer-title" style={{fontSize:15,marginBottom:10}}>{detail.series.title}</h1>{shown&&<Player key="stable-fixture-player" detail={detail} initialEpisode={initialEpisode} initialPosition={0} settings={settings} accountKey={account} onSettings={patchPreferences} onLibrary={()=>{}} onClose={closePlayer} onSeries={value=>{data.seriesEvents.push(value.series.id);setDetail(value);}}/>}</div>;
+  return <div data-fixture-account={account} style={{height:'100vh',overflow:'auto',padding:'15px 28px'}}><h1 className="fixture-outer-title" style={{fontSize:15,marginBottom:10}}>{detail.series.title}</h1>{shown&&<Player key="stable-fixture-player" detail={detail} initialEpisode={initialEpisode} initialPosition={0} settings={settings} accountKey={account} onSettings={patchPreferences} onLibrary={()=>{}} onClose={closePlayer} onSeries={value=>{data.seriesEvents.push(value.series.id);setDetail(value);}}/>}</div>;
 }
 createRoot(document.getElementById('root')).render(<Fixture/>);
 `;
@@ -84,7 +85,7 @@ const load=async(mode='core',episode=3,autoplay=true)=>{await page.goto(origin+`
 const end=async()=>{await active().evaluate(v=>{v.currentTime=v.duration-.15;void v.play();});};
 const stays=async(name)=>{await page.waitForTimeout(1200);check(name,await active().evaluate(v=>v.dataset.seriesId==='12345678'),await page.evaluate(()=>({seriesEvents:window.__qa.seriesEvents,episode:document.querySelector('video[data-active=true]')?.dataset.episode})));};
 try{
-  instance=await electron.launch({args:[path.join(work,'main.cjs')],cwd:root,env:{...process.env,HG_TEST_BACKGROUND:'1',HG_TEST_DATA_DIR:path.join(work,'profile'),HG_QA_ORIGIN:origin},timeout:60000});page=await instance.firstWindow();page.on('pageerror',error=>errors.push(error.message));
+  instance=await electron.launch({args:[path.join(work,'main.cjs')],cwd:root,env:{...process.env,HG_TEST_BACKGROUND:'1',HG_TEST_DATA_DIR:path.join(work,'profile'),HG_QA_ORIGIN:origin,TEMP:work,TMP:work},timeout:60000});page=await instance.firstWindow();page.on('pageerror',error=>errors.push(error.message));
   await load('core',1);await active().evaluate(v=>v.pause());
   await page.waitForFunction(()=>window.__qa.requests.some(r=>r.route.includes('/next-season'))&&window.__qa.requests.some(r=>r.method==='POST'&&r.body?.seriesId==='87654321'),undefined,{timeout:10000});
   check('末三集已识别并准备下一季源',true);
@@ -110,10 +111,10 @@ try{
       if(action==='pause')await page.getByTitle('暂停（空格）',{exact:true}).click();
       if(action==='autoplay')await page.evaluate(()=>window.__qa.patch({autoplay:false}));
       if(action==='hide')await page.evaluate(()=>window.__qa.hide());
-      if(action==='account')await page.evaluate(()=>window.__qa.changeAccount('replacement-fixture-account'));
+      if(action==='account'){await page.evaluate(()=>window.__qa.changeAccount('replacement-fixture-account'));await page.waitForFunction(()=>document.querySelector('[data-fixture-account]')?.getAttribute('data-fixture-account')==='replacement-fixture-account'&&window.__qa.accountCommitted==='replacement-fixture-account');}
       if(action==='seek')await page.getByLabel('播放进度',{exact:true}).evaluate(input=>{const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;setter.call(input,'2');input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));});
       await page.evaluate(()=>window.__qa.releaseLookup());await stays('慢查季期间 '+action+' 阻止迟到自动跨季');
-      if(action==='account')check('旧账号迟到回复不读取下一季详情',await page.evaluate(()=>!window.__qa.requests.some(r=>r.route==='/catalog/series/87654321')));
+      if(action==='account'){const evidence=await page.evaluate(()=>({accountCommitted:window.__qa.accountCommitted,callbacks:window.__qa.callbacks,requests:window.__qa.requests.filter(r=>r.route.startsWith('/catalog/series/'))}));await writeFile(path.join(work,'account-transition.json'),JSON.stringify(evidence,null,2));check('旧账号迟到回复不读取下一季详情',await page.evaluate(()=>!window.__qa.requests.some(r=>r.route==='/catalog/series/87654321')),evidence);}
     }
     await load('retry',3,true);await page.waitForFunction(()=>window.__qa.failWaiting);await page.getByRole('button',{name:'播放下一季',exact:true}).click();await page.evaluate(()=>window.__qa.releaseFailure());await page.locator('.next-season-card[data-season-status=error]').waitFor({timeout:15000});await page.getByRole('button',{name:'重试下一季',exact:true}).click();await page.locator('.next-season-card[data-season-status=ready]').waitFor({timeout:15000});await page.getByRole('button',{name:'播放下一季',exact:true}).click();await page.waitForFunction(()=>document.querySelector('video[data-active=true]')?.dataset.seriesId==='87654321',undefined,{timeout:15000});check('跨季实际解码失败后小卡重试可提交',true);
     await load('ambiguous',3,true);await end();await stays('歧义季关联不自动跳转');check('歧义关联未分配下一季媒体',await page.evaluate(()=>!window.__qa.requests.some(r=>r.method==='POST'&&r.body?.seriesId==='87654321')));
