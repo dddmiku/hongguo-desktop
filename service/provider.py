@@ -30,7 +30,8 @@ from favorite_sync import set_favorite as reconcile_favorite
 from progress_contract import build_playback_progress_item, build_progress_item, epoch_seconds, mobile_position_seconds
 from source_download import SourceDownloader
 from seasons import SeasonResolver
-from search import SearchRows, search_series
+from search import SearchRows, rank_results, search_series
+from web_search import OfficialWebSearch
 from qr_login import QrLoginManager, QrLoginError
 
 
@@ -357,14 +358,16 @@ class CatalogCache:
 
 
 class Provider:
-    def __init__(self, data_dir: Path, sdk=None, account=None):
+    def __init__(self, data_dir: Path, sdk=None, account=None, *, web_search=None):
         self.data_dir = Path(data_dir).resolve()
         self.source_dir = self.data_dir / "source-cache"
         self.source_dir.mkdir(parents=True, exist_ok=True)
         self.sdk, self.account = sdk, account
+        self.web_search = web_search
         self.source_downloader=SourceDownloader(lambda *args,**kwargs:self.sdk.http_request(*args,**kwargs))
         self.cache = RequestCache()
-        self.seasons = SeasonResolver(self.sdk, self.detail, self._read)
+        self.seasons = SeasonResolver(self.sdk, self.detail, self._read,
+            search_fallback=web_search.candidates if web_search and callable(getattr(web_search,'candidates',None)) else None)
         self.catalog_cache = CatalogCache(self.data_dir / "catalog-cache.json")
         self._source_guard = threading.Condition()
         self._sources_running = set()
@@ -404,6 +407,7 @@ class Provider:
         # Verified with identical payloads: signed requests return real content.
         sdk.SIGN_LIST = True
         vault = SessionVault(data_dir / "account-session.dpapi")
+        sdk.session_loader = vault.load
         mfa_vault = SessionVault(data_dir / "account-mfa.dpapi")
         account.load_session, account.save_session = vault.load, vault.save
         account.save_mfa = lambda value: mfa_vault.save({**value, "at": value.get("at") or time.time()})
@@ -415,7 +419,7 @@ class Provider:
             mfa_vault.clear()
             return vault.clear()
         account.clear_session = clear_session
-        return cls(data_dir, sdk, account)
+        return cls(data_dir, sdk, account, web_search=OfficialWebSearch())
 
     def _read(self, label, loader):
         if self._closed.is_set():
@@ -479,17 +483,92 @@ class Provider:
         return {"items": items, "hasMore": bool(items) and next_offset > offset,
                 "cursor": next_cursor if next_offset > offset else ""}
 
-    def search(self, query):
+    def search(self, query, cursor='', refresh=False):
         query = str(query or "").strip()
         if not 1 <= len(query) <= 80 or any(ord(char) < 32 for char in query):
             raise ProviderError("INPUT_INVALID", "请输入 1–80 个字的剧名", 400)
+        if hasattr(self.sdk, 'search_page'):
+            return self._search_page(query, cursor, refresh)
         def fetch(term):
             def read():
                 rows = self._read("搜索短剧", lambda: self.sdk.search(term, max_items=40))
                 return SearchRows(self._list(rows), complete=getattr(rows, 'complete', True))
             return self.cache.get(("search", term), 120,
                 read, cacheable=lambda rows: rows.complete)
-        return search_series(query, fetch)
+        try:
+            return search_series(query, fetch)
+        except ProviderError as original:
+            if self.web_search is None:
+                raise
+            try:
+                rows = self._list(self.web_search.search(query))
+                if not rows:
+                    raise original
+                return {'items': rank_results(query, rows), 'source': 'official-web',
+                        'warning': '手机搜索暂时未能连接，已使用官网结果，可刷新重新查询'}
+            except Exception:
+                raise original from None
+
+    def _search_page(self, query, cursor='', refresh=False):
+        key=('search-page', query, cursor)
+        if refresh:
+            self.cache.invalidate(key)
+        def load():
+            continuation=None
+            if cursor:
+                continuation=self.cache.get(('search-cursor',cursor),900,lambda:None)
+                if not continuation or continuation['query']!=query:
+                    raise ProviderError('CURSOR_EXPIRED','搜索结果已更新，请刷新后继续',400)
+            old=continuation or {'offset':0,'passback':'','search_id':'','seen':[]}
+            try:
+                response=self._read('搜索短剧',lambda:self.sdk.search_page(query,offset=old['offset'],
+                    passback=old['passback'],search_id=old['search_id']))
+            except ProviderError as original:
+                if cursor or self.web_search is None:
+                    raise
+                try:
+                    rows=self._list(self.web_search.search(query))
+                    if not rows:raise original
+                    return {'items':rank_results(query,rows),'hasMore':False,'cursor':'','source':'official-web',
+                            'warning':'手机搜索暂时未能连接，已使用官网结果，可刷新重新查询'}
+                except Exception:
+                    raise original from None
+            seen=set(old['seen'])
+            items=[item for item in self._list(response['items']) if item['id'] not in seen]
+            next_cursor=''
+            has_more=bool(response['hasMore']) and bool(items)
+            if has_more:
+                seen.update(item['id'] for item in items)
+                if len(seen)>5000:
+                    has_more=False
+                else:
+                    next_cursor=secrets.token_hex(12)
+                    next_state={'query':query,'offset':response['offset'],'passback':response['passback'],
+                                'search_id':response['search_id'],'seen':list(seen)}
+                    self.cache.get(('search-cursor',next_cursor),900,lambda:next_state)
+            warning='' if response.get('complete',True) else '部分搜索结果暂未补齐，可刷新重新查询'
+            if response['hasMore'] and not items:
+                warning='搜索服务重复返回已有结果，已保留作品，可刷新重试'
+            return {'items':rank_results(query,items),'hasMore':has_more,'cursor':next_cursor,'source':'mobile-drama',
+                    **({'warning':warning} if warning else {})}
+        return self.cache.get(key,60,load,cacheable=lambda result:'warning' not in result)
+
+    def search_suggestions(self, query):
+        query = str(query or '').strip()
+        if not 1 <= len(query) <= 80 or any(ord(char) < 32 for char in query):
+            raise ProviderError('INPUT_INVALID', '请输入 1–80 个字的剧名', 400)
+        def load():
+            if self.web_search is not None:
+                try:
+                    rows = self._list(self.web_search.suggestions(query, max_items=8))
+                    return {'items': rank_results(query, rows, limit=8), 'source': 'official-web'}
+                except Exception:
+                    pass
+            read = getattr(self.sdk, 'suggestions', None)
+            rows = self._read('搜索短剧', lambda: read(query, max_items=8) if read else self.sdk.search(query, max_items=8))
+            return {'items': rank_results(query, self._list(rows), limit=8), 'source': 'mobile',
+                    **({'warning': '部分搜索结果暂未补齐'} if not getattr(rows, 'complete', True) else {})}
+        return self.cache.get(('suggestions', query), 30, load, cacheable=lambda result: 'warning' not in result)
 
     def rank(self, board="hot", genre="short_play"):
         self._genre(genre)
@@ -1152,7 +1231,7 @@ class Provider:
                     continue
                 track = {**row, "video_meta": {**{key: row[key] for key in ("definition", "codec_type", "size") if key in row}, **(meta or {})},
                          "encrypt_info": {**{key: row[key] for key in ("encrypt", "spade_a") if key in row}, **(encryption or {})}}
-                for field in ("main_url", "backup_url_1", "backup_url"):
+                for field in ("main_url", "backup_url_1", "backup_url", "backup_url_2", "backup_url_3"):
                     value = row.get(field)
                     try:
                         track[field] = self._media_url(value)
@@ -1160,7 +1239,7 @@ class Provider:
                             track[field] = self._media_url(decode_playback_url(value, model["key_seed"]))
                     except ValueError:
                         track[field] = None
-                if any(track[field] for field in ("main_url", "backup_url_1", "backup_url")):
+                if any(track[field] for field in ("main_url", "backup_url_1", "backup_url", "backup_url_2", "backup_url_3")):
                     normalized.append(track)
             supported = compatible(normalized)
             if not supported:
@@ -1168,6 +1247,49 @@ class Provider:
             return supported
 
         return self.cache.get(("compatible-tracks", vid), 600, lambda: self._read("取得兼容播放地址", read))
+
+    def _web_playback_tracks(self, vid, series_id, episode, quality, cancelled):
+        reader = getattr(self.web_search, "playback_tracks", None)
+        if not callable(reader):
+            raise ProviderError("MEDIA_WEB_UNAVAILABLE", "官网播放线路暂时不可用，请重试当前集")
+        load = getattr(self.account, "load_session", None)
+        identity = getattr(self.account, "_session_identity", None)
+        credentials = dict(load() or {}) if callable(load) else {}
+        def fingerprint(session):
+            if callable(identity):
+                return identity(session)
+            return hashlib.sha256(json.dumps([session.get(key, "") for key in ("uid", "cookie", "token")]).encode()).digest()
+        original = fingerprint(credentials)
+        website_credentials = SessionVault(self.data_dir / 'web-session.dpapi').load()
+        if website_credentials.get('ownerIdentity') == original:
+            credentials.update({key:website_credentials[key] for key in ('cookie','token') if website_credentials.get(key)})
+        website_credentials.clear()
+        checked_at = [0.0]
+        def check(force=False):
+            self._cancel(cancelled)
+            now = time.monotonic()
+            if not force and now - checked_at[0] < .25:
+                return
+            checked_at[0] = now
+            if original != fingerprint(dict(load() or {}) if callable(load) else {}):
+                raise ProviderError("ACCOUNT_CHANGED", "账号已切换，请重新播放当前集", 409)
+        check(True)
+        try:
+            tracks = reader(vid, series_id, int(episode), quality, cancelled, session=credentials)
+        except Exception as error:
+            check(True)
+            code = getattr(error, "code", "")
+            if code == "MEDIA_CANCELLED":
+                raise ProviderError("MEDIA_CANCELLED", "播放准备已取消", 409) from None
+            if code == "WEB_PLAYBACK_RESTRICTED":
+                raise ProviderError("MEDIA_ACCESS_RESTRICTED", "官网暂未开放这集的播放权限，已保留当前进度", 403) from None
+            raise ProviderError("MEDIA_WEB_UNAVAILABLE", "官网播放线路暂时不可用，请重试当前集") from None
+        finally:
+            credentials.clear()
+        check(True)
+        if not isinstance(tracks, list) or not tracks:
+            raise ProviderError("MEDIA_WEB_UNAVAILABLE", "官网播放线路暂时不可用，请重试当前集")
+        return tracks, check
 
     def source(self, series_id, episode, quality="auto", cancelled=None) -> Path:
         sid = identifier(series_id)
@@ -1190,32 +1312,100 @@ class Provider:
             self._sources_running.add(key)
         encrypted, raw, partial = (self.source_dir / f"{key}.{suffix}" for suffix in ("encrypted.partial", "raw.partial", "ready.partial"))
         try:
-            tracks = self._read("取得播放地址", lambda: self.sdk.get_video_tracks([target["vid"]]).get(target["vid"]) or [])
-            tracks = self._compatible_tracks(target["vid"], tracks, cancelled)
-            if not tracks:
-                raise ProviderError("MEDIA_CODEC_UNSUPPORTED", "上游暂时没有兼容的播放画质，请稍后重试")
+            from vendor.safeguards import AuthExpiredError, RiskControlError
+
             def resolution(track):
                 return number(re.sub(r"\D", "", str((track.get("video_meta") or {}).get("definition") or "")))
-            desired = number(re.sub(r"\D", "", quality), 1080)
-            exact = [track for track in tracks if resolution(track) == desired]
-            lower = [track for track in tracks if resolution(track) <= desired]
-            track = max(exact or lower or tracks, key=resolution)
-            urls = [self._media_url(track.get(field)) for field in ("main_url", "backup_url_1", "backup_url")]
-            urls = list(dict.fromkeys(url for url in urls if url))
-            downloaded = False
-            for url in urls:
-                self._cancel(cancelled)
+
+            def mobile_tracks(force):
+                # Preserve authentication and safety failures before _read maps
+                # generic SDK errors to a temporary upstream outage.
                 try:
-                    self.source_downloader.download(url,encrypted,lambda:self._cancel(cancelled))
-                    downloaded = True
+                    models = self.sdk.get_video_tracks([target["vid"]], **({"force": True} if force else {}))
+                except AuthExpiredError:
+                    raise ProviderError("AUTH_EXPIRED", "手机登录态已失效，请重新登录后播放", 401) from None
+                except RiskControlError:
+                    raise ProviderError("UPSTREAM_RISK_CONTROL", "手机播放线路触发安全验证，请稍后重试", 429) from None
+                tracks = models.get(target["vid"]) if isinstance(models, dict) else None
+                if not isinstance(tracks, list) or not tracks:
+                    raise ProviderError("MEDIA_SOURCE_EMPTY", "手机暂未返回这集的播放地址，请重试当前集")
+                return tracks
+
+            desired = number(re.sub(r"\D", "", quality), 1080)
+            downloaded, track, attempts = False, None, 0
+            attempted_urls = set()
+            website = callable(getattr(self.web_search, "playback_tracks", None))
+            mobile_unavailable, last_error = False, None
+            retryable_models = {"UPSTREAM_TIMEOUT", "UPSTREAM_UNAVAILABLE", "MEDIA_SOURCE_EMPTY"}
+            website_fallback = retryable_models | {"MEDIA_CODEC_UNSUPPORTED"}
+            source_check = lambda force=False: self._cancel(cancelled)
+            channels = ("mobile", "mobile-refresh", "website") if website else ("mobile", "mobile-refresh")
+            for channel in channels:
+                source_check()
+                if channel == "website":
+                    tracks, source_check = self._web_playback_tracks(target["vid"], sid, episode, quality, cancelled)
+                    budget = 6
+                else:
+                    if mobile_unavailable:
+                        continue
+                    model_loaded = False
+                    try:
+                        if channel == "mobile-refresh":
+                            # A signed model can outlive its CDN URLs. Re-read the
+                            # model instead of retrying the same cached addresses.
+                            self.cache.invalidate(("compatible-tracks", target["vid"]))
+                            tracks = self._read("更新播放地址", lambda: mobile_tracks(True))
+                        else:
+                            tracks = self._read("取得播放地址", lambda: mobile_tracks(False))
+                        model_loaded = True
+                        tracks = self._compatible_tracks(target["vid"], tracks, cancelled)
+                        if not tracks:
+                            raise ProviderError("MEDIA_CODEC_UNSUPPORTED", "上游暂时没有兼容的播放画质，请稍后重试")
+                    except ProviderError as error:
+                        source_check()
+                        if error.code not in website_fallback:
+                            raise
+                        last_error = error
+                        if not model_loaded and error.code in retryable_models:
+                            # Empty, timed-out and temporarily unavailable models
+                            # get one fresh mobile read before website fallback.
+                            continue
+                        if not website:
+                            raise
+                        mobile_unavailable = True
+                        continue
+                    # Leave room for refreshed mobile backups even when there is
+                    # no website channel; the total is always at most six tries.
+                    budget = min(6, attempts + 2) if website else (3 if channel == "mobile" else 6)
+                # Prefer the requested rendition, then lower compatible renditions
+                # of this same episode. Every track keeps its own decryption data.
+                ordered = sorted(tracks, key=lambda row: (0 if resolution(row) == desired else 1 if resolution(row) <= desired else 2, -resolution(row)))
+                for candidate in ordered:
+                    urls = [self._media_url(candidate.get(field)) for field in
+                            ("main_url", "backup_url_1", "backup_url", "backup_url_2", "backup_url_3")]
+                    for url in dict.fromkeys(url for url in urls if url):
+                        source_check()
+                        if url in attempted_urls or attempts >= budget:
+                            continue
+                        attempted_urls.add(url); attempts += 1
+                        try:
+                            encrypted.unlink(missing_ok=True)
+                            self.source_downloader.download(url, encrypted, source_check)
+                            downloaded, track = True, candidate
+                            break
+                        except ProviderError:
+                            raise
+                        except Exception:
+                            source_check()
+                            last_error = ProviderError("MEDIA_DOWNLOAD_FAILED", "播放源连接失败，请重试当前集")
+                            encrypted.unlink(missing_ok=True)
+                    if downloaded:
+                        break
+                if downloaded or attempts >= 6:
                     break
-                except ProviderError:
-                    raise
-                except Exception:
-                    continue
             if not downloaded:
-                raise ProviderError("MEDIA_DOWNLOAD_FAILED", "播放源连接失败，请重试当前集")
-            self._cancel(cancelled)
+                raise last_error or ProviderError("MEDIA_DOWNLOAD_FAILED", "播放源连接失败，请重试当前集")
+            source_check(True)
             encryption = track.get("encrypt_info") or {}
             if encryption.get("encrypt"):
                 from vendor import unwrap_spade, mp4_samples, decrypt
@@ -1228,10 +1418,10 @@ class Provider:
                 stats = decrypt.decrypt_av(str(encrypted), key_hex, str(raw))
                 if "vide" not in stats or stats["vide"][0] != stats["vide"][1]:
                     raise ProviderError("MEDIA_DECRYPT_FAILED", "播放源校验失败，请重试当前集")
-                self._remux(raw, partial, cancelled)
+                self._remux(raw, partial, lambda: (source_check(), False)[1])
             else:
                 os.replace(encrypted, partial)
-            self._cancel(cancelled)
+            source_check(True)
             os.replace(partial, out)
             with self._source_guard:
                 self._leases[str(out)] = self._leases.get(str(out), 0) + 1

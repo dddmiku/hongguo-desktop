@@ -383,8 +383,7 @@ def _call(method, path, body=None, extra=None, session=None, host=None, form=Non
         headers['lc'] = '101'
         headers['x-vc-bdturing-sdk-version'] = '4.0.3.cn'
         headers['x-ss-req-ticket'] = str(int(time.time() * 1000))
-        import secrets as _secrets
-        headers['x-ss-stub'] = _secrets.token_hex(16).upper()
+        headers['x-ss-stub'] = hashlib.md5(data or b'').hexdigest().upper()
         csrf = ''
         cookie_text = headers.get('cookie') or ''
         m = re.search('passport_csrf_token=([^;]+)', cookie_text)
@@ -396,7 +395,7 @@ def _call(method, path, body=None, extra=None, session=None, host=None, form=Non
         base = headers.get('cookie') or ''
         headers['cookie'] = (base + '; ' + cookie_extra).strip('; ') if base else cookie_extra
     _t_sign0 = time.perf_counter()
-    headers.update(H.sign(url, headers))
+    headers.update(H.sign(url, headers, data))
     _t_sign = time.perf_counter()
     headers.pop('accept-encoding', None)
     if passport:

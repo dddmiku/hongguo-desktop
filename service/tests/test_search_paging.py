@@ -19,7 +19,7 @@ def cell(sid, title):
 
 
 def page(rows, *, more=False, offset=0, passback=''):
-    return {'code': 0, 'search_tabs': [{'data': rows, 'has_more': more,
+    return {'code': 0, 'search_tabs': [{'tab_type': 29, 'data': rows, 'has_more': more,
             'next_offset': offset, 'passback': passback, 'search_id': 'synthetic-search'}]}
 
 
@@ -63,6 +63,49 @@ class SearchPagingTests(unittest.TestCase):
         self.assertTrue(complete.complete)
         self.assertEqual(self.api.call_count, 2)
         self.cache_write.assert_called_once()
+
+    def test_real_drama_tab_is_selected_instead_of_comprehensive_recommendations(self):
+        title = '无敌财神！我觉醒了唯一隐藏职业'
+        ids = ['7663491547907755033', '7672980478944611352', '7679746591594384409',
+               '7687248701831515198', '7697459723225795646', '7703825719729589310']
+        series = [cell(sid, title + (str(index) + '季' if index > 1 else '')) for index, sid in enumerate(ids, 1)]
+        self.api.return_value = {'code': 0, 'selected_tab_idx': 1, 'search_tabs': [
+            {'tab_type': 11, 'title': '综合', 'data': [series[0], cell('12345678', '无关推荐')], 'has_more': False},
+            {'tab_type': 29, 'title': '剧集', 'data': series, 'has_more': False}]}
+        result = self.sdk.search(title, max_items=40)
+        self.assertEqual([row['series_id'] for row in result], ids)
+        self.assertEqual(self.api.call_args.kwargs['extra_query']['tab_type'], '29')
+
+    def test_series_page_exposes_only_parsed_hits_and_native_paging(self):
+        self.api.return_value = page([self.first, self.second], more=True, offset=10, passback='next')
+        result = self.sdk.search_page('觉醒伪神', offset=0)
+        self.assertEqual(len(result['items']), 2)
+        self.assertTrue(result['hasMore'])
+        self.assertEqual(result['offset'], 10)
+        self.assertEqual(result['passback'], 'next')
+        self.assertTrue(result['complete'])
+
+    def test_search_suggestions_read_only_one_episode_tab_page(self):
+        self.api.return_value = page([self.first, self.second], more=True, offset=10)
+        result = self.sdk.suggestions('觉醒伪神', max_items=1)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(self.api.call_count, 1)
+        self.assertEqual(self.api.call_args.kwargs['extra_query']['tab_type'], '29')
+
+    def test_drama_tab_identity_wins_over_selected_index_and_response_order(self):
+        self.api.return_value = {'selected_tab_idx': 0, 'search_tabs': [
+            {'tab_type': 30, 'title': '视频', 'data': [cell('12345678', '其他内容')]},
+            {'tab_type': '29', 'title': '剧集', 'data': [self.first], 'has_more': False},
+            {'tab_type': 11, 'title': '综合', 'data': [self.second], 'has_more': False}]}
+        result = self.sdk.search_page('觉醒伪神')
+        self.assertEqual([row['series_id'] for row in result['items']], [self.first['book_id']])
+
+    def test_absent_or_duplicate_drama_tab_does_not_silently_fall_back_to_recommendations(self):
+        for tabs in ([{'tab_type': 11, 'data': [self.first]}],
+                     [{'tab_type': 29, 'data': [self.first]}, {'tab_type': 29, 'data': [self.second]}]):
+            self.api.return_value = {'search_tabs': tabs}
+            with self.assertRaises(RuntimeError):
+                self.sdk.search_page('觉醒伪神')
 
     def test_first_page_failure_still_reaches_the_provider_error_boundary(self):
         self.api.side_effect = requests.Timeout('synthetic failure')

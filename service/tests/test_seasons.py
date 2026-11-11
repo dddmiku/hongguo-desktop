@@ -40,7 +40,7 @@ class FixtureSDK:
 
     def _api(self, method, path, **kwargs):
         if method == "GET":
-            return {"search_tabs": [{"data": deepcopy(self.search_rows), "has_more": False}]}
+            return {"search_tabs": [{"tab_type": 29, "data": deepcopy(self.search_rows), "has_more": False}]}
         ids = kwargs["body"]["series_id"].split(",")
         return {"data": {sid: {"video_data": deepcopy(self.values[sid])} for sid in ids}}
 
@@ -69,11 +69,11 @@ class SeasonTests(unittest.TestCase):
                 return sdk._api(method, path, **options)
             params = options["extra_query"]
             if params["query"] != "谁说没灵根不能修仙":
-                return {"search_tabs": [{"data": [rows[0], rows[-2]], "has_more": False}]}
+                return {"search_tabs": [{"tab_type": 29, "data": [rows[0], rows[-2]], "has_more": False}]}
             offset = int(params["offset"])
             size = 6 if offset == 0 else 10
             candidates = [*rows, *extras]
-            return {"search_tabs": [{"data": deepcopy(candidates[offset:offset + size]),
+            return {"search_tabs": [{"tab_type": 29, "data": deepcopy(candidates[offset:offset + size]),
                     "has_more": offset + size < len(candidates), "next_offset": offset + size}]}
         sdk.api.side_effect = pages
         return resolver, sdk, detail, ids
@@ -88,6 +88,114 @@ class SeasonTests(unittest.TestCase):
         self.assertEqual(set(queries), {"谁说没灵根不能修仙"})
         self.assertGreater(len(queries), 4)
         detail.assert_not_called()
+
+    def test_real_drama_tab_returns_all_official_seasons_not_comprehensive_recommendations(self):
+        title = '无敌财神！我觉醒了唯一隐藏职业'
+        ids = [str(12000000 + index) for index in range(1, 7)]
+        rows = [metadata(sid, title + (str(index) + '季' if index > 1 else ''), season=index,
+                         album=ALBUM, total_episode=index + 76) for index, sid in enumerate(ids, 1)]
+        resolver, sdk, _ = self.resolver(rows)
+        def selected(method, path, **options):
+            if method == 'GET':
+                return {'selected_tab_idx': 1, 'search_tabs': [
+                    {'tab_type': 11, 'title': '综合', 'data': [rows[0]], 'has_more': False},
+                    {'tab_type': 29, 'title': '剧集', 'data': rows, 'has_more': False}]}
+            return sdk._api(method, path, **options)
+        sdk.api.side_effect = selected
+        overview = resolver.overview(ids[0])
+        self.assertEqual([row['season'] for row in overview['seasons']], list(range(1, 7)))
+        calls = [call for call in sdk.api.call_args_list if call.args[0] == 'GET']
+        self.assertEqual(calls[0].kwargs['extra_query']['tab_type'], '29')
+
+    def web_family(self):
+        title = '无敌财神！我觉醒了唯一隐藏职业'
+        ids = [str(12000000 + index) for index in range(1, 7)]
+        rows = [metadata(sid, title + (str(index) + '季' if index > 1 else ''), season=index,
+                         album=ALBUM, total_episode=index + 76,
+                         video_list=[{'vid_index':1, 'vid':str(22000000+index)}]) for index, sid in enumerate(ids, 1)]
+        fallback = Mock(return_value=[{'series_id':row['series_id'], 'title':row['series_title']} for row in rows])
+        resolver, sdk, detail = self.resolver(rows, search_fallback=fallback)
+        return resolver, sdk, detail, fallback, rows, ids
+
+    def test_web_candidates_fill_only_current_mobile_discovery_and_keep_official_links(self):
+        resolver, sdk, detail, fallback, rows, ids = self.web_family()
+        sdk.search_rows = rows[:1]
+        overview = resolver.overview(ids[0])
+        self.assertEqual([row['season'] for row in overview['seasons']], list(range(1, 7)))
+        self.assertFalse(overview['complete'])
+        self.assertEqual(overview['source'], 'official')
+        self.assertEqual(resolver.resolve(ids[0])['next']['id'], ids[1])
+        fallback.assert_called_once_with(parse_season_title(rows[0]['series_title']).base)
+        detail.assert_not_called()
+
+    def test_web_candidates_can_restore_mobile_search_outage_without_claiming_complete(self):
+        resolver, sdk, _, fallback, rows, ids = self.web_family()
+        def unavailable(method, path, **options):
+            if method == 'GET':raise SeasonLookupError('固定手机搜索失败')
+            return sdk._api(method, path, **options)
+        sdk.api.side_effect = unavailable
+        overview = resolver.overview(ids[0])
+        self.assertEqual(len(overview['seasons']), 6)
+        self.assertFalse(overview['complete'])
+        self.assertEqual(overview['source'], 'official')
+        fallback.assert_called_once()
+
+    def test_web_candidates_fill_gaps_when_mobile_discovery_only_has_first_and_sixth(self):
+        resolver, sdk, _, fallback, rows, ids = self.web_family()
+        sdk.search_rows = [rows[0], rows[-1]]
+        overview = resolver.overview(ids[0])
+        self.assertEqual([row['season'] for row in overview['seasons']], list(range(1, 7)))
+        self.assertFalse(overview['complete'])
+        fallback.assert_called_once()
+
+    def test_web_failure_keeps_existing_mobile_rows_as_partial_and_refresh_is_retryable(self):
+        resolver, sdk, _, fallback, rows, ids = self.web_family()
+        sdk.search_rows = rows[:2]
+        fallback.side_effect = SeasonLookupError('固定官网失败')
+        # Force an incomplete discovery so both channels are necessary.
+        def partial(method, path, **options):
+            if method == 'GET':
+                offset = options['extra_query']['offset']
+                if offset != '0':raise SeasonLookupError('固定后页失败')
+                return {'search_tabs':[{'tab_type':29, 'data':rows[:2], 'has_more':True,'next_offset':2}]}
+            return sdk._api(method, path, **options)
+        sdk.api.side_effect = partial
+        overview = resolver.overview(ids[0])
+        self.assertEqual([row['season'] for row in overview['seasons']], [1, 2])
+        self.assertFalse(overview['complete'])
+        self.assertLessEqual(resolver.values[ids[0]][0] - resolver.clock(), resolver.empty_ttl)
+        fallback.side_effect = None
+        self.assertEqual(len(resolver.overview(ids[0], refresh=True)['seasons']), 6)
+
+    def test_both_discovery_sources_failing_preserves_original_error_and_has_no_empty_cache(self):
+        resolver, sdk, _, fallback, rows, ids = self.web_family()
+        original = SeasonLookupError('固定手机原始失败')
+        def unavailable(method, path, **options):
+            if method == 'GET':raise original
+            return sdk._api(method, path, **options)
+        sdk.api.side_effect = unavailable
+        fallback.side_effect = RuntimeError('固定官网失败')
+        with self.assertRaises(SeasonLookupError) as caught:resolver.overview(ids[0])
+        self.assertIs(caught.exception, original)
+        self.assertFalse(resolver.values)
+
+    def test_web_candidates_still_reject_other_official_album_and_invalid_entries(self):
+        resolver, sdk, _, fallback, rows, ids = self.web_family()
+        sdk.search_rows = rows[:1]
+        sdk.values[OTHER] = metadata(OTHER, rows[0]['series_title'] + '7季', season=7,
+                                     album='111111111', total_episode=20)
+        fallback.return_value.extend([{'series_id':OTHER, 'title':sdk.values[OTHER]['series_title']},
+                                       {'series_id':'invalid', 'title':'无效'}, 'invalid'])
+        overview = resolver.overview(ids[0])
+        self.assertEqual([row['season'] for row in overview['seasons']], list(range(1, 7)))
+        self.assertNotIn(OTHER, [row['series']['id'] for row in overview['seasons']])
+
+    def test_verified_mobile_family_does_not_need_optional_website_reads(self):
+        resolver, sdk, _, fallback, rows, ids = self.web_family()
+        overview = resolver.overview(ids[0])
+        self.assertEqual(len(overview['seasons']), 6)
+        self.assertTrue(overview['complete'])
+        fallback.assert_not_called()
 
     def test_official_family_snapshot_is_reused_from_middle_season_without_requery(self):
         resolver, sdk, _, ids = self.large_question_family()
@@ -179,7 +287,7 @@ class SeasonTests(unittest.TestCase):
                 reads[0] += 1
                 if reads[0] > 1:
                     raise SeasonLookupError("固定后页失败")
-                return {"search_tabs": [{"data": deepcopy(rows), "has_more": True, "next_offset": 2}]}
+                return {"search_tabs": [{"tab_type": 29, "data": deepcopy(rows), "has_more": True, "next_offset": 2}]}
             return sdk._api(method, path, **options)
         sdk.api.side_effect = interrupted
         overview = resolver.overview(CURRENT)
@@ -193,7 +301,7 @@ class SeasonTests(unittest.TestCase):
     def test_discovery_candidates_remain_bounded_and_a_cap_is_not_complete(self):
         resolver, sdk, _, _ = self.large_question_family()
         many = [metadata(str(42000000 + number), "春风第二季", total_episode=8) for number in range(200)]
-        sdk.api.side_effect = lambda *args, **options: {"search_tabs": [{"data": many, "has_more": True,
+        sdk.api.side_effect = lambda *args, **options: {"search_tabs": [{"tab_type": 29, "data": many, "has_more": True,
                                                                        "next_offset": 200}]}
         candidates = resolver._search_query("春风", family_base="春风")
         self.assertEqual(len(candidates), 128)
@@ -226,7 +334,7 @@ class SeasonTests(unittest.TestCase):
             if method == "GET":
                 query = kwargs["extra_query"]["query"]
                 candidates = [rows[0], rows[-1], *rows[1:-1]] if query == "觉醒伪神" else [rows[0]]
-                return {"search_tabs": [{"data": deepcopy(candidates), "has_more": False}]}
+                return {"search_tabs": [{"tab_type": 29, "data": deepcopy(candidates), "has_more": False}]}
             return sdk._api(method, path, **kwargs)
         sdk.api.side_effect = search
         result = resolver.overview(CURRENT)
@@ -369,7 +477,7 @@ class SeasonTests(unittest.TestCase):
         resolver, sdk, _ = self.resolver([metadata(CURRENT, "春风")])
         def stuck(method, path, **kwargs):
             if method == "GET":
-                return {"search_tabs": [{"data": sdk.search_rows, "has_more": True, "next_offset": 0}]}
+                return {"search_tabs": [{"tab_type": 29, "data": sdk.search_rows, "has_more": True, "next_offset": 0}]}
             return sdk._api(method, path, **kwargs)
         sdk.api.side_effect = stuck
         result = resolver.overview(CURRENT)

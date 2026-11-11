@@ -20,6 +20,8 @@ MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 1536 * 1024 * 1024
 MAX_ENTRIES = 40000
 REQUIRED = ("python/python.exe", "jre/bin/java.exe", "sign/unidbg-sign.jar", "ffmpeg.exe",
+            "sign/domestic-sign.jar", "capture/domestic/libmetasec_ml.so",
+            "capture/domestic/libc++_shared.so", "capture/domestic/sdk-metadata.bin",
             "capture/fq_oversea/libc++_shared.so", "capture/fq_oversea/libmetasec_ml.so",
             "capture/fq_oversea/ms_16777218.bin")
 

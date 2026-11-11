@@ -4,31 +4,35 @@ import type { PlaybackTarget, PreparedDeck } from './SeamlessSwitcher';
 import {episodeDuration} from './timeline';
 import {hardwareHevc} from './capabilities';
 import {mediaPreload} from './MediaPreload';
+import {MediaSessionLease} from './MediaSessionLease';
+import {PlaybackCheckpoint} from './PlaybackCheckpoint';
 
 export interface VideoDeck extends PreparedDeck { video: HTMLVideoElement; hls: Hls | null; sessionId: string; duration: number; sealed: boolean; }
 const aborted = () => new DOMException('Cancelled', 'AbortError');
-const wait = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
-  const stop = () => { clearTimeout(timer); reject(aborted()); };
-  const timer = setTimeout(() => { signal.removeEventListener('abort', stop); resolve(); }, ms);
-  signal.addEventListener('abort', stop, { once: true }); if (signal.aborted) stop();
-});
 
 /** A detached decoder slot. No account writes and no audible background playback. */
 export class HlsDeckLoader {
   private decks = new Map<number, VideoDeck>();
   constructor(private videos: HTMLVideoElement[], private bridge: NativeBridge,
               private onFatal: (deck: VideoDeck, message: string) => void,
-              private onPreparing:(target:PlaybackTarget,message:string)=>void=()=>{}) {}
+              private onPreparing:(target:PlaybackTarget,message:string)=>void=()=>{},
+              private playbackIntent:(deck:VideoDeck)=>boolean|undefined=()=>undefined) {}
   async prepare(index: number, target: PlaybackTarget, signal: AbortSignal): Promise<VideoDeck> {
     if (signal.aborted) throw aborted();
     const video = this.videos[index];
     const previous = this.decks.get(index); if (previous) await previous.release();
     let sessionId = '', engine: Hls | null = null, released = false, settled = false,leaseTimer:ReturnType<typeof setInterval>|undefined;
+    let lease:MediaSessionLease|null=null,reconnectPlayback:(session:MediaSession,position:number)=>void=()=>{};
+    const checkpoint=new PlaybackCheckpoint(video,target.start);
+    const rememberPosition=()=>checkpoint.capture();
+    const positionEvents=['timeupdate','seeking','seeked','playing','pause'];
+    for(const event of positionEvents)video.addEventListener(event,rememberPosition);
     video.pause(); video.muted = true; video.volume = 0; video.style.visibility = 'visible';
     const deck: VideoDeck = { index, target, video, hls: null, sessionId: '', duration:episodeDuration(0,target.duration),sealed:false,release: () => {
       if (released) return; released = true; clearInterval(leaseTimer);engine?.destroy();
+      for(const event of positionEvents)video.removeEventListener(event,rememberPosition);
       if (this.decks.get(index) === deck) { this.decks.delete(index); video.pause(); video.removeAttribute('src'); video.load(); }
-      if (sessionId) void this.bridge.request(`/media/session/${sessionId}`, { method: 'DELETE' }).catch(() => {});
+      lease?.release();
     } };
     this.decks.set(index, deck);
     const abort = () => { void deck.release(); }; signal.addEventListener('abort', abort, { once: true });
@@ -36,21 +40,36 @@ export class HlsDeckLoader {
       this.onPreparing(target,'正在连接片源');
       const acceptHevc = !target.compatible && await hardwareHevc();
       if (signal.aborted || released) throw aborted();
-      let session = await (mediaPreload(this.bridge).claim(target)??this.bridge.request<MediaSession>('/media/session', { method: 'POST', body: { seriesId: target.seriesId, episode: target.episode, quality: target.quality, start: target.start, ...(acceptHevc ? {acceptHevc:true} : {}) } }));
+      lease=new MediaSessionLease(this.bridge,{seriesId:target.seriesId,episode:target.episode,quality:target.quality,start:target.start,...(acceptHevc?{acceptHevc:true}:{})},signal);
+      const session=await lease.open(mediaPreload(this.bridge).claim(target)??undefined);
       sessionId = session.id; deck.sessionId = session.id;
-      if (signal.aborted || released) { void this.bridge.request(`/media/session/${sessionId}`, { method: 'DELETE' }).catch(() => {}); throw aborted(); }
-      leaseTimer=setInterval(()=>{if(!released)void this.bridge.request(`/media/session/${sessionId}`).catch(()=>{});},60000);
-      const deadline = Date.now() + 120000;
-      while (session.phase === 'preparing') {
-        if (signal.aborted) throw aborted(); if (Date.now() > deadline) throw new Error('准备时间较长，请重试当前集');
-        await wait(150, signal); session = await this.bridge.request<MediaSession>(`/media/session/${sessionId}`);
-      }
+      if (signal.aborted || released) throw aborted();
+      leaseTimer=setInterval(()=>{
+        if(released||!lease)return;
+        const position=checkpoint.read();
+        void lease.read(position).then(current=>{
+          if(!released&&current.id!==deck.sessionId){sessionId=current.id;deck.sessionId=current.id;reconnectPlayback(current,position);}
+        }).catch(error=>{if(!released&&error instanceof Error&&error.message==='播放连接已失效，请重试当前集')this.onFatal(deck,error.message);});
+      },60000);
       if (signal.aborted) throw aborted();
       if (session.phase === 'error' || session.phase === 'cancelled') throw new Error(session.error || '视频准备失败');
       deck.duration=episodeDuration(session.duration,target.duration);
       this.onPreparing(target,'正在打开画面');
       await new Promise<void>((resolve, reject) => {
         let priming = false, frameId = 0,lastBufferedFragment=-1,endSignalled=false;
+        reconnectPlayback=(replacement,position)=>{
+          if(released||signal.aborted)return;
+          const resume=this.playbackIntent(deck)??!video.paused;
+          const restore=()=>{
+            if(released||signal.aborted)return;
+            if(Number.isFinite(video.duration))video.currentTime=Math.min(position,Math.max(0,video.duration-.2));
+            if(this.playbackIntent(deck)??resume)void video.play().catch(()=>{});else video.pause();
+          };
+          video.addEventListener('canplay',restore,{once:true});
+          lastBufferedFragment=-1;endSignalled=false;deck.sealed=false;
+          if(engine){engine.config.startPosition=position;engine.loadSource(replacement.url);engine.startLoad(position);}
+          else video.src=replacement.url;
+        };
         const finishStream=()=>{
           const details=engine?.levels[engine.currentLevel]?.details;
           if(!engine||endSignalled||details?.live!==false||details.fragments.at(-1)?.sn!==lastBufferedFragment)return;
@@ -91,6 +110,17 @@ export class HlsDeckLoader {
           engine.on(Hls.Events.FRAG_BUFFERED,(_event,data)=>{if(data.frag.type==='main'){lastBufferedFragment=typeof data.frag.sn==='number'?data.frag.sn:-1;finishStream();}});
           engine.on(Hls.Events.ERROR, (_event, data) => {
             if (!data.fatal || released || signal.aborted) return;
+            if(data.type===Hls.ErrorTypes.NETWORK_ERROR&&lease){
+              const position=checkpoint.read();
+              this.onPreparing(target,'播放连接暂时中断，正在重新连接');
+              void lease.reconnect(position).then(replacement=>{
+                if(released||signal.aborted||replacement.id===deck.sessionId)return;sessionId=replacement.id;deck.sessionId=replacement.id;reconnectPlayback(replacement,position);
+              }).catch(error=>{
+                if(released||signal.aborted)return;
+                const text=error instanceof Error?error.message:'播放连接暂时不可用，请重试当前集';
+                if(!settled)finish(new Error(text));else this.onFatal(deck,text);
+              });return;
+            }
             if (data.type === Hls.ErrorTypes.MEDIA_ERROR && acceptHevc) {
               target.compatible = true;
               if (!settled) finish(new Error('显卡解码暂不可用，正在切换兼容播放'));
@@ -111,6 +141,10 @@ export class HlsDeckLoader {
     } catch (error) {
       signal.removeEventListener('abort', abort); void deck.release();
       if (target.compatible && !signal.aborted && (error as Error).message === '显卡解码暂不可用，正在切换兼容播放') return this.prepare(index,target,signal);
+      if(error instanceof Error&&error.name!=='AbortError'){
+        const readable=error.message.replace(/^Error invoking remote method (?:'[^'\r\n]+'|"[^"\r\n]+"): (?:Error: )?/, '');
+        if(readable!==error.message)throw new Error(readable);
+      }
       throw error;
     }
   }

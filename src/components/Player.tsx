@@ -213,7 +213,8 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     const loader = new HlsDeckLoader(elements, window.hongguo, (deck, message) => {
       if(current()===deck&&deck.target.compatible&&!compatible.current){compatible.current=true;void selectEpisode(deck.target.episode,false,deck.video.currentTime,true,true);return;}
       if (current() === deck && mounted.current) { setError(message); setChrome(true); shouldPlay.current = false; }
-    },(wanted,message)=>{if(mounted.current&&!current()&&requested.current?.episode===wanted.episode)setPhase(message);});
+    },(wanted,message)=>{if(mounted.current&&!current()&&requested.current?.episode===wanted.episode)setPhase(message);},
+      deck=>current()===deck&&visible.current&&shouldPlay.current);
     const controller = new SeamlessSwitcher<VideoDeck>({
       prepare: async(index, wanted, signal) => {const account=latest.current.accountKey;const deck=await loader.prepare(index,wanted,signal);if(account!==latest.current.accountKey){await deck.release();throw new DOMException('Account changed','AbortError');}deckAccounts.current.set(deck,account);deck.video.dataset.seriesId=wanted.seriesId;deck.video.dataset.episode=String(wanted.episode);return deck;},
       present: (deck, previous, automatic) => {

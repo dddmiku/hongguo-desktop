@@ -354,7 +354,15 @@ class MediaManager:
                 job.phase = "cancelled" if job.stop.is_set() or isinstance(error, MediaCancelled) else "error"
                 # 不把 CDN 凭据、绝对路径或供应商响应内容返回给界面。
                 if job.phase == "error":
-                    job.error = f"视频准备失败（{type(error).__name__}），请重试"
+                    messages = {
+                        "MEDIA_ACCESS_RESTRICTED": "官网暂未开放这集的播放权限，已保留当前进度",
+                        "MEDIA_WEB_UNAVAILABLE": "官网播放线路暂时不可用，请重试当前集",
+                        "MEDIA_DOWNLOAD_FAILED": "各播放线路暂时连接失败，请重试当前集",
+                        "MEDIA_CODEC_UNSUPPORTED": "这集暂未取得兼容片源，请重试或更换画质",
+                        "MEDIA_DECRYPT_FAILED": "这集片源暂时无法解码，请更换画质重试",
+                        "ACCOUNT_CHANGED": "账号已切换，请重新播放当前集",
+                    }
+                    job.error = messages.get(getattr(error, "code", ""), "视频准备暂时失败，请重试当前集")
             if job.process is not None:
                 self._terminate(job.process)
             if job.directory.name.endswith(".part"):
@@ -564,7 +572,8 @@ def mount_media(app, manager):
         try:
             return manager.get(identifier, str(request.base_url))
         except KeyError:
-            raise HTTPException(404, "播放会话不存在") from None
+            raise HTTPException(404, {"error": {"code": "MEDIA_SESSION_EXPIRED",
+                                               "message": "播放会话已过期，请重新连接"}}) from None
 
     @app.delete("/media/session/{identifier}")
     def cancel_session(identifier: str):

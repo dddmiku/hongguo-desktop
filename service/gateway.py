@@ -107,8 +107,12 @@ def create_app(provider, token, media_manager=None, signer_ok=lambda: True):
         return provider.home(genre, cursor, mode, refresh=refresh)
 
     @app.get("/catalog/search")
-    def search(q: str = Query(..., min_length=1, max_length=80)):
-        return provider.search(q)
+    def search(q: str = Query(..., min_length=1, max_length=80),cursor: str=Query('',max_length=80),refresh:bool=Query(False)):
+        return provider.search(q,cursor,refresh=refresh)
+
+    @app.get('/catalog/search/suggestions')
+    def search_suggestions(query: str = Query(..., min_length=1, max_length=80)):
+        return provider.search_suggestions(query)
 
     @app.get("/catalog/rank")
     def rank(board: str = Query("hot", max_length=32), genre: str = Query("short_play", max_length=32)):
@@ -260,11 +264,19 @@ class OwnedSigner:
     def start(self, stop):
         java = self.root / "jre" / "bin" / ("java.exe" if os.name == "nt" else "java")
         jar = self.root / "sign" / "unidbg-sign.jar"
-        if not java.is_file() or not jar.is_file():
+        domestic = self.root / "sign" / "domestic-sign.jar"
+        assets = self.root / "capture" / "domestic"
+        data = Path(os.environ.get("HG_DATA_DIR") or self.root.parent / "_work" / "sign-data")
+        temporary = data / "signer-temp"
+        temporary.mkdir(parents=True, exist_ok=True)
+        if not java.is_file() or not jar.is_file() or not domestic.is_file() or any(
+                not (assets / name).is_file() for name in ("libmetasec_ml.so", "libc++_shared.so", "sdk-metadata.bin")):
             raise RuntimeError("Signing runtime is missing")
         self.process = subprocess.Popen([str(java), "-Djava.net.preferIPv4Stack=true", "--add-opens",
-            "java.base/java.lang=ALL-UNNAMED", "-Xmx512m", "-XX:+ExitOnOutOfMemoryError", "-cp", str(jar),
-            "com.hongguo.sign.FqTrace", "serve", "0"], cwd=jar.parent, stdin=subprocess.DEVNULL,
+            "java.base/java.lang=ALL-UNNAMED", "-Xmx512m", "-XX:+ExitOnOutOfMemoryError",
+            "-Djava.io.tmpdir=" + str(temporary), "-Djna.tmpdir=" + str(temporary),
+            "-Dhongguo.sign.data=" + str(data), "-cp", os.pathsep.join((str(domestic), str(jar))),
+            "com.hongguo.sign.DomesticSigner", str(assets), str(data)], cwd=jar.parent, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 

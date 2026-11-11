@@ -70,6 +70,21 @@ class CompatibilityTests(unittest.TestCase):
         self.provider.source("12345678", 4)
         self.sdk.http_request.assert_not_called()
 
+    def test_extra_official_backups_are_decoded_before_downloader_failover(self):
+        row = self.model["video_info"]["data"]["video_list"]["video_1"]
+        self.model["video_info"]["data"]["key_seed"] = _SEED
+        row["main_url"] = base64.b64encode(b"https://cdn.example.com/expired-main.mp4").decode()
+        row["backup_url_2"] = _ENCRYPTED_URL
+        def download(url, output, cancelled):
+            if url.endswith('/expired-main.mp4'):
+                raise OSError('Controlled unavailable primary CDN')
+            return self.download(url, output, cancelled)
+        self.provider.source_downloader.download.side_effect = download
+        source = self.provider.source("12345678", 4)
+        self.assertEqual(source.read_bytes(), b"fixture-playable-source")
+        self.assertEqual(self.provider.source_downloader.download.call_args.args[0],
+                         "https://cdn.example.com/compatible.mp4")
+
     def test_encrypted_official_fallback_urls_are_decoded_before_download(self):
         self.model["video_info"]["data"]["key_seed"] = _SEED
         self.model["video_info"]["data"]["video_list"]["video_1"]["main_url"] = _ENCRYPTED_URL

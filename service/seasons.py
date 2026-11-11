@@ -204,8 +204,10 @@ class SeasonResolver:
     Exceptions propagate through the injected provider read boundary and are
     never cached. A refresh explicitly bypasses successful cached resolutions.
     """
-    def __init__(self, sdk, detail, read, *, capacity=128, ttl=600, empty_ttl=120, clock=time.monotonic):
+    def __init__(self, sdk, detail, read, *, capacity=128, ttl=600, empty_ttl=120, clock=time.monotonic,
+                 search_fallback=None):
         self.sdk, self.detail, self.read = sdk, detail, read
+        self.search_fallback = search_fallback
         self.capacity = max(1, min(256, int(capacity)))
         self.ttl = max(1, min(3600, float(ttl)))
         self.empty_ttl = max(1, min(self.ttl, float(empty_ttl)))
@@ -314,10 +316,64 @@ class SeasonResolver:
             discovery = split[0].strip()
             if discovery.endswith("的"):
                 discovery = discovery[:-1]
-        return self._search_query(discovery, family_base=query)
+        try:
+            mobile = self._search_query(discovery, family_base=query)
+        except Exception as original:
+            if self.search_fallback is None:
+                raise
+            try:
+                supplemental = self._fallback_candidates(query)
+            except Exception:
+                raise original from None
+            if not supplemental:
+                raise original from None
+            # Website suggestions are bounded discovery candidates, not a claim
+            # that every official season has been enumerated.
+            from search import SearchRows
+            return SearchRows(supplemental, complete=False)
+        family = _base_key(parse_season_title(query).base)
+        indexes = {parsed.index for row in mobile if (parsed := parse_season_title(row["title"])).safe
+                   and _base_key(parsed.base) == family}
+        gaps = bool(indexes) and (min(indexes) > 1 or max(indexes) - min(indexes) + 1 > len(indexes))
+        if self.search_fallback is None or getattr(mobile, "complete", True) and len(indexes) > 1 and not gaps:
+            return mobile
+        from search import SearchRows
+        try:
+            supplemental = self._fallback_candidates(query)
+        except Exception:
+            if not mobile:
+                raise SeasonLookupError("关联季的搜索来源暂时不可用") from None
+            return SearchRows(mobile, complete=False)
+        merged = list(mobile)
+        seen = {row["id"] for row in merged}
+        for row in supplemental:
+            if row["id"] in seen:
+                continue
+            merged.append(row)
+            seen.add(row["id"])
+            if len(merged) == 128:
+                break
+        return SearchRows(merged, complete=False)
+
+    def _fallback_candidates(self, query):
+        rows = self.search_fallback(query)
+        if not isinstance(rows, list):
+            raise SeasonLookupError("关联季的搜索来源暂时不可用")
+        result, seen = [], set()
+        for row in rows[:128]:
+            if not isinstance(row, dict):
+                continue
+            sid = str(row.get("series_id") or row.get("id") or "")
+            title = str(row.get("title") or "").strip()
+            if not _ID.fullmatch(sid) or not title or sid in seen:
+                continue
+            result.append({"id": sid, "title": title[:200]})
+            seen.add(sid)
+        return result
 
     def _search_query(self, query, *, family_base=""):
         from search import SearchRows
+        from search_protocol import select_search_tab
         results, seen = [], set()
         offset, passback, search_id = 0, "", ""
         cursors = {("0", "", "")}
@@ -325,7 +381,7 @@ class SeasonResolver:
         matched_family, empty_family_pages = False, 0
         complete = True
         for _ in range(12):
-            params = {"query": query, "tab_name": "feed", "search_source": "1", "offset": str(offset),
+            params = {"query": query, "tab_name": "feed", "tab_type": "29", "search_source": "1", "offset": str(offset),
                       "count": "0", "use_correct": "false"}
             if passback:
                 params["passback"] = passback
@@ -333,15 +389,11 @@ class SeasonResolver:
                 params["search_id"] = search_id
             try:
                 raw = self.sdk.api("GET", "/reading/bookapi/search/tab/v", extra_query=params)
-                tabs = raw.get("search_tabs") if isinstance(raw, dict) else None
-                if not isinstance(tabs, list):
-                    raise SeasonLookupError("下一季搜索结果暂时不可用")
-                if not tabs:
-                    break
-                tab = tabs[0]
-                rows = tab.get("data") if isinstance(tab, dict) else None
-                if not isinstance(rows, list):
-                    raise SeasonLookupError("下一季搜索结果暂时不可用")
+                try:
+                    tab = select_search_tab(raw)
+                except RuntimeError:
+                    raise SeasonLookupError("下一季搜索结果暂时不可用") from None
+                rows = tab['data']
             except Exception:
                 if not results:
                     raise

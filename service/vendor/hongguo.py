@@ -1,10 +1,11 @@
 # Adapted protocol leaf SDK; provenance: service/vendor/README.md.
 """Content protocol leaf SDK for the managed desktop gateway. Signing is supplied only by its owned loopback signer; no emulator or captured user session fallback."""
-import sys, os, json, time, hashlib, re, subprocess, threading
+import sys, os, json, time, hashlib, re, subprocess, threading, gzip, base64
 import urllib3
 import requests
 from . import safeguards as SG
 from .safeguards import RiskControlError, AuthExpiredError
+from search_protocol import select_search_tab
 IMPERSONATE = os.environ.get('IMPERSONATE', 'chrome')
 HONGGUO_PROXY = os.environ.get('HONGGUO_PROXY', '').strip()
 try:
@@ -50,6 +51,7 @@ CFG_PATH = os.environ.get('HONGGUO_CONTENT_CONFIG') or os.path.join(HERE, 'confi
 CFG = json.load(open(CFG_PATH, encoding='utf-8-sig'))
 HOST = CFG['api_host']
 _pool = None
+session_loader = None
 IMAGE_SHRINK = 'W3siaW1hZ2VfdHlwZSI6MywiaW1hZ2Vfd2lkdGgiOjkwMCwic2hyaW5rX3R5cGUiOjN9LHsiaW1h\nZ2VfdHlwZSI6NCwiaW1hZ2Vfd2lkdGgiOjU0LCJzaHJpbmtfdHlwZSI6NH1d\n'
 SIGN_SERVERS = [s.strip() for s in (os.environ.get('SIGN_SERVER') or '').split(',') if s.strip()]
 SIGN_LIST = (os.environ.get('HG_SIGN_LIST') or '').strip().lower() in ('1', 'true', 'yes', 'on')
@@ -71,17 +73,20 @@ def _sign_session():
         _tls.sign = s
     return s
 
-def sign(url, headers):
+def sign(url, headers, body=None):
     if not SIGN_SERVERS:
         raise RuntimeError('Owned signing service is not configured')
     session = _sign_session()
+    payload = {'url': url, 'headers': headers}
+    if body is not None:
+        payload['body_base64'] = base64.b64encode(body).decode('ascii')
     for _ in range(len(SIGN_SERVERS)):
         base = _next_sign_server()
         try:
-            response = session.post(base.rstrip('/') + '/sign', json={'url': url, 'headers': headers}, timeout=40)
+            response = session.post(base.rstrip('/') + '/sign', json=payload, timeout=40)
             response.raise_for_status()
             result = response.json()
-            if isinstance(result, dict) and 'error' not in result:
+            if isinstance(result, dict) and 'error' not in result and {'x-argus', 'x-gorgon', 'x-khronos'} <= {str(key).lower() for key in result}:
                 return result
         except Exception:
             continue
@@ -97,7 +102,7 @@ try:
         CFG['session_headers']['user-agent'] = _HQ_USER_AGENT
 except Exception:
     pass
-_API_HOSTS = [h.strip() for h in os.environ.get('HG_API_HOSTS', '').split(',') if h.strip()] or ['api5-normal-sinfonlineb.fqnovel.com', 'api5-normal-sinfonlinec.fqnovel.com', 'api3-normal-sinfonlinea.fqnovel.com', 'api3-normal-sinfonlineb.fqnovel.com', 'api5-normal.fqnovel.com', 'api.fqnovel.com']
+_API_HOSTS = [h.strip() for h in os.environ.get('HG_API_HOSTS', '').split(',') if h.strip()] or ['api5-normal-sinfonlinea.fqnovel.com', 'reading.snssdk.com', 'api5-normal-sinfonlineb.fqnovel.com', 'api5-normal-sinfonlinec.fqnovel.com', 'api3-normal-sinfonlinea.fqnovel.com', 'api3-normal-sinfonlineb.fqnovel.com', 'api5-normal.fqnovel.com', 'api.fqnovel.com']
 _api_host_pref = None
 
 def _api_hosts_ordered():
@@ -117,6 +122,8 @@ def _hq_apply_device_identity():
     try:
         with open(path, encoding='utf-8') as handle:
             device = json.load(handle)
+        if device.get('device_id'):
+            CFG['base_query']['device_id'] = str(device['device_id'])
         if device.get('iid'):
             CFG['base_query']['iid'] = str(device['iid'])
         if device.get('cdid'):
@@ -154,6 +161,13 @@ def build_url(path, extra=None, host=None):
 def _api_once(method, path, body, extra_query, signed=True, host=None):
     url = build_url(path, extra_query, host)
     headers = dict(CFG['session_headers'])
+    if callable(session_loader):
+        current = dict(session_loader() or {})
+        for source, target in (('cookie', 'cookie'), ('token', 'x-tt-token')):
+            value = current.get(source)
+            if isinstance(value, str) and value:
+                headers[target] = value
+        current.clear()
     if _pool:
         _ua = _pool.current().get('user_agent')
         if _ua:
@@ -164,9 +178,12 @@ def _api_once(method, path, body, extra_query, signed=True, host=None):
     data = None
     if body is not None:
         data = json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        if path.startswith('/novel/player/'):
+            data = gzip.compress(data, mtime=0)
+            headers['content-encoding'] = 'gzip'
         headers['x-ss-stub'] = hashlib.md5(data).hexdigest().upper()
     if signed:
-        headers.update(sign(url, headers))
+        headers.update(sign(url, headers, data))
     headers.pop('accept-encoding', None)
     SG.throttle.wait()
     r = http_request(method, url, data=data, headers=headers, timeout=30)
@@ -259,7 +276,7 @@ def _cover_tags(d):
     return out
 
 def _parse_search_cell(cell):
-    """从综合tab的一个cell解析短剧条目; 非短剧(无集数)或无id返回 None。"""
+    """从搜索的一个cell解析剧集条目; 非剧集(无集数)或无id返回 None。"""
     sid = cell.get('book_id') or cell.get('search_result_id')
     if not sid:
         return None
@@ -277,8 +294,59 @@ def _parse_search_cell(cell):
     title = re.sub('<[^>]+>', '', hl or vd.get('series_title') or vdata.get('title') or inner.get('series_title') or '')
     return {'series_id': sid, 'title': title, 'episode_cnt': ep, 'score': vdata.get('score') or inner.get('score') or '', 'play_cnt': vdata.get('play_cnt') or inner.get('series_play_cnt') or 0, 'hot': vdata.get('rec_text') or '', 'copyright': vdata.get('copyright') or '', 'cover': vdata.get('cover') or inner.get('series_cover') or '', 'intro': (inner.get('series_intro') or vd.get('series_intro') or '')[:60], 'vid': vdata.get('vid') or '', 'duration': vdata.get('duration') or 0, 'horiz_cover': vdata.get('horiz_cover') or '', 'cover_tags': _cover_tags(vdata)}
 
+def search_page(query, *, offset=0, passback='', search_id=''):
+    """One official mobile drama page; only parsed public rows and native cursors survive."""
+    params = {'query': query, 'tab_name': 'feed', 'tab_type': '29', 'search_source': '1',
+              'offset': str(offset), 'count': '0', 'use_correct': 'false'}
+    if passback:
+        params['passback'] = passback
+    if search_id:
+        params['search_id'] = search_id
+    tab = select_search_tab(api('GET', '/reading/bookapi/search/tab/v', extra_query=params))
+    items, seen, complete = [], set(), True
+    for cell in tab['data']:
+        if not isinstance(cell, dict):
+            complete = False
+            continue
+        try:
+            item = _parse_search_cell(cell)
+        except (AttributeError, TypeError, ValueError):
+            complete = False
+            continue
+        if not item:
+            continue
+        sid = str(item.get('series_id') or '')
+        if not re.fullmatch(r'[0-9]{8,24}', sid):
+            complete = False
+            continue
+        if sid in seen:
+            continue
+        seen.add(sid)
+        item['series_id'] = sid
+        items.append(item)
+    has_more = bool(tab.get('has_more'))
+    next_offset = tab.get('next_offset')
+    next_passback = str(tab.get('passback') or passback)
+    next_search_id = str(tab.get('search_id') or search_id)
+    if has_more and (next_offset is None or not tab['data'] or
+                    (str(next_offset), next_passback, next_search_id) ==
+                    (str(offset), str(passback), str(search_id))):
+        has_more, complete = False, False
+    return {'items': items, 'offset': next_offset if next_offset is not None else offset,
+            'passback': next_passback, 'search_id': next_search_id,
+            'hasMore': has_more, 'complete': complete}
+
+
+def suggestions(query, max_items=8):
+    """Public suggestions use one drama tab page and do not start pagination."""
+    from search import SearchRows
+    limit = max(1, min(int(max_items), 12))
+    page = search_page(query)
+    return SearchRows(page['items'][:limit], complete=page['complete'])
+
+
 def search(query, max_items=None):
-    """搜索短剧。原生接口按综合tab分页(next_offset+passback+search_id),
+    """搜索剧集。原生剧集tab按 next_offset+passback+search_id 分页,
     这里循环翻页累计短剧结果, 直到 has_more=False 或达 max_items / 翻页上限。
     max_items 越小翻页越少越快(单 IP 顺序翻页是单次延迟主因); 默认走 HG_SEARCH_MAX_ITEMS(20)。
     """
@@ -288,7 +356,7 @@ def search(query, max_items=None):
     if max_items is None:
         max_items = int(os.environ.get('HG_SEARCH_MAX_ITEMS', '20'))
     max_items = max(1, min(max_items, 40))
-    ck = SG.cache_key('search', query, max_items)
+    ck = SG.cache_key('search-drama-29', query, max_items)
     cached = SG.cache_get(ck)
     if cached is not None:
         return SearchRows(cached, complete=getattr(cached, 'complete', True))
@@ -297,22 +365,8 @@ def search(query, max_items=None):
     cursors = {('0', '', '')}
     complete = True
     for _ in range(12):
-        q = {'query': query, 'tab_name': 'feed', 'search_source': '1', 'offset': str(offset), 'count': '0', 'use_correct': 'true'}
-        if passback:
-            q['passback'] = passback
-        if search_id:
-            q['search_id'] = search_id
         try:
-            j = api('GET', '/reading/bookapi/search/tab/v', extra_query=q)
-            tabs = j.get('search_tabs') if isinstance(j, dict) else None
-            if not isinstance(tabs, list):
-                raise RuntimeError('Search response is unavailable')
-            if not tabs:
-                break
-            tab = tabs[0]
-            data = tab.get('data') if isinstance(tab, dict) else None
-            if not isinstance(data, list):
-                raise RuntimeError('Search response is unavailable')
+            page = search_page(query, offset=offset, passback=passback, search_id=search_id)
         except Exception:
             # A later read failure must not erase the matches already obtained.
             # Keep the first-page failure visible to Provider's fixed error boundary.
@@ -320,28 +374,21 @@ def search(query, max_items=None):
                 raise
             complete = False
             break
-        for cell in data:
-            try:
-                item = _parse_search_cell(cell) if isinstance(cell, dict) else None
-                if not isinstance(cell, dict):
-                    complete = False
-            except (AttributeError, TypeError, ValueError):
-                complete = False
-                continue
-            if not item or item['series_id'] in seen:
+        complete = complete and page['complete']
+        for item in page['items']:
+            if item['series_id'] in seen:
                 continue
             seen.add(item['series_id'])
             results.append(item)
         if not results and not complete:
             raise RuntimeError('Search response is unavailable')
-        if len(results) >= max_items or not tab.get('has_more'):
+        if len(results) >= max_items or not page['hasMore']:
             break
-        nxt = tab.get('next_offset')
-        next_offset = nxt if nxt is not None else offset
-        next_passback = tab.get('passback') or passback
-        next_search_id = tab.get('search_id') or search_id
+        next_offset = page['offset']
+        next_passback = page['passback']
+        next_search_id = page['search_id']
         cursor = (str(next_offset), str(next_passback), str(next_search_id))
-        if not data or cursor in cursors:
+        if cursor in cursors:
             complete = False
             break
         cursors.add(cursor)
@@ -426,7 +473,7 @@ def video_model_tracks(model):
     normalized = []
     for source in tracks:
         track = dict(source)
-        for field in ('main_url', 'backup_url', 'backup_url_1'):
+        for field in ('main_url', 'backup_url', 'backup_url_1', 'backup_url_2', 'backup_url_3'):
             value = track.get(field)
             if not value:
                 continue
@@ -521,7 +568,27 @@ def get_video_tracks(vids, force=False, batch_size=5):
         batch = todo[i:i + bs]
         body = {'biz_param': {'detail_page_version': 0, 'device_level': 3, 'disable_digg_stat': False, 'disable_video_relate_book': False, 'need_all_video_definition': True, 'need_mp4_align': False, 'use_os_player': False, 'use_server_dns': False, 'video_platform': 1024}, 'mixed_video_id_map': {'1': batch}}
         _hq_got = {}
+        modern = {**body, 'dr_scene': 'player', 'mixed_video_id_map': {'1004': batch}}
+        try:
+            response = api('POST', '/novel/player/multi_video_model/player/v1', body=modern)
+            def collect(value):
+                if not isinstance(value, dict):
+                    return
+                for key, entry in value.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    if str(key) in batch and entry.get('video_model'):
+                        _hq_got[str(key)] = entry
+                    else:
+                        collect(entry)
+            collect(response.get('data') or {})
+        except (RiskControlError, AuthExpiredError):
+            raise
+        except UpstreamResponseError:
+            pass
         for _hq_v in batch:
+            if str(_hq_v) in _hq_got:
+                continue
             try:
                 _hq_j = api('GET', '/reading/bookapi/video_tab/video_model/v1/', extra_query={'video_id': str(_hq_v), 'need_all_video_definition': '1'})
                 _hq_vm = (_hq_j.get('data') or {}).get('video_model')

@@ -62,7 +62,7 @@ export default function Catalog({ page, query, genre, accountKey, favorites, his
     const slowTimer = setTimeout(() => { if (id === generation.current) setSlow(true); }, 6000);
     const request = async (refresh = false) => {
       try {
-        const data = await window.hongguo.request<CatalogResult>(path + (refresh && (page === 'discover' || page === 'recommend') ? '&refresh=true' : ''));
+        const data = await window.hongguo.request<CatalogResult>(path + (refresh && (page === 'discover' || page === 'recommend' || page === 'search') ? '&refresh=true' : ''));
         if (id !== generation.current) return;
         apply(data); writeCatalog(cacheKey, data); setError(data.warning || '');
         if (first) { first = false; requestAnimationFrame(() => ready.current?.()); }
@@ -80,7 +80,7 @@ export default function Catalog({ page, query, genre, accountKey, favorites, his
     const id = generation.current; setMoreLoading(true);
     try {
       const data = await window.hongguo.request<CatalogResult>(`${path}&cursor=${encodeURIComponent(cursor)}`);
-      if (id === generation.current) { setItems(current => { const items = [...current, ...data.items.filter(item => !current.some(s => s.id === item.id))]; writeCatalog(cacheKey, { ...data, filters: data.filters || { groups }, items }); return items; }); setHasMore(!!data.hasMore); setCursor(data.cursor || ''); }
+      if (id === generation.current) { setItems(current => { const items = [...current, ...data.items.filter(item => !current.some(s => s.id === item.id))]; writeCatalog(cacheKey, { ...data, filters: data.filters || { groups }, items }); return items; }); setHasMore(!!data.hasMore); setCursor(data.cursor || ''); setError(data.warning || ''); setMoreError(false); }
     } catch (e) { if (id === generation.current) { setError(message(e)); setMoreError(true); } }
     finally { if (id === generation.current) setMoreLoading(false); }
   };

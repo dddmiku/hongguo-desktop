@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Bookmark, Check, ChevronRight, Clock3, Compass, Heart, Layers3, LoaderCircle, Maximize2, Minus, Play, RefreshCw, Search, Settings2, ShieldCheck, Sparkles, Trash2, Trophy, UserRound, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Bookmark, Check, ChevronRight, Clock3, Compass, Heart, Layers3, LoaderCircle, Maximize2, Minus, Play, RefreshCw, Settings2, ShieldCheck, Sparkles, Trash2, Trophy, UserRound, X } from 'lucide-react';
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Genre, HistoryItem, Library, Series, SeriesDetail, Session, Settings as Preferences } from '../shared/contracts';
 import Catalog, { SeriesCard } from './components/Catalog';
@@ -11,6 +11,7 @@ import { clearPrivateCatalogs } from './catalog-cache';
 import {mediaPreload} from './playback/MediaPreload';
 import PlaybackPlaceholder from './components/PlaybackPlaceholder';
 import SeasonOverview from './components/SeasonOverview';
+import SearchBox from './components/SearchBox';
 import brandIcon from '../assets/brand.png';
 const loadPlayer=()=>import('./components/Player');
 const Player = lazy(loadPlayer);
@@ -22,7 +23,7 @@ const dateLabel = (value: number) => { const date = new Date(value > 1e12 ? valu
 
 export default function App() {
   const [page, setPage] = useState<Page>('discover'), [genre, setGenre] = useState<Genre>('short_play');
-  const [input, setInput] = useState(''), [query, setQuery] = useState('');
+  const [query, setQuery] = useState('');
   const [settings, setSettings] = useState<Preferences>(defaults), [library, setLibrary] = useState<Library>({ history: [], favorites: [] });
   const [booting, setBooting] = useState(true), [bootError, setBootError] = useState(''), [syncing, setSyncing] = useState(false), [toast, setToast] = useState('');
   const [detail, setDetail] = useState<SeriesDetail | null>(null), [detailId, setDetailId] = useState(''), [detailError, setDetailError] = useState(''), [episodeLimit, setEpisodeLimit] = useState(120);
@@ -101,7 +102,7 @@ export default function App() {
       <button className="top-brand" onClick={() => go('discover')} aria-label="红果桌面首页"><img className="brand-icon" src={brandIcon} alt=""/><strong>红果<span>桌面</span></strong></button>
       <nav className="top-nav" aria-label="主导航">{nav.map(item => <button key={item.id} aria-label={item.title} aria-current={page === item.id && !playVisible ? 'page' : undefined} className={page === item.id && !playVisible ? 'active' : ''} onClick={() => go(item.id as Page)}><item.icon size={18} /><span>{item.title}</span></button>)}</nav>
       <div className="header-drag-space" />
-      <form className="global-search" onSubmit={e => { e.preventDefault(); const value = input.trim(); if (value) { setQuery(value); go('search'); } }}><Search size={17} /><input ref={search} aria-label="搜索剧名、演员或关键词" placeholder="搜索剧名、演员或关键词" maxLength={80} value={input} onChange={e => setInput(e.target.value)} />{input ? <button type="button" className="search-clear" aria-label="清除搜索关键词" onClick={() => { setInput(''); search.current?.focus(); }}><X size={14} /></button> : <kbd>Ctrl K</kbd>}<button className="search-submit" aria-label="搜索" type="submit"><ArrowRight size={16} /></button></form>
+      <SearchBox inputRef={search} onSearch={value=>{setQuery(value);go('search');}} onSelect={series=>void openDetail(series)}/>
       <div className="header-tools"><button className={`header-shortcut icon-button ${page === 'history' && !play ? 'active' : ''}`} title="观看历史" aria-label="观看历史" onClick={() => go('history')}><Clock3 size={19} /></button><button className={`header-shortcut icon-button ${page === 'favorites' && !play ? 'active' : ''}`} title="我的收藏" aria-label="我的收藏" onClick={() => go('favorites')}><Heart size={19} /></button><button className={`my-library-button ${drawer ? 'active' : ''}`} aria-label="我的片库" aria-expanded={drawer} onClick={() => setDrawer(value => !value)}><Bookmark size={19} /><span>我的片库</span>{library.history.length > 0 && <i />}</button><button className={`header-account icon-button ${page === 'account' ? 'active' : ''} ${session?.loggedIn ? 'signed-in' : ''}`} aria-label={session?.loggedIn ? '我的账号' : '登录账号'} title={session?.loggedIn ? `${session.nickname || '已登录'} · 账号与同步` : '登录红果账号'} onClick={() => go('account')}><UserRound size={19} />{session?.loggedIn && <i />}</button><button className={`header-settings icon-button ${page === 'settings' ? 'active' : ''}`} onClick={() => go('settings')} aria-label="设置" title="设置"><Settings2 size={19} /></button></div>
       <div className="window-buttons"><button aria-label="最小化窗口" onClick={() => void window.hongguo?.window('minimize')}><Minus size={17} /></button><button aria-label="最大化或还原窗口" onClick={() => void window.hongguo?.window('maximize')}><Maximize2 size={14} /></button><button className="window-close" aria-label="关闭窗口" onClick={() => void window.hongguo?.window('close')}><X size={19} /></button></div>
     </header>

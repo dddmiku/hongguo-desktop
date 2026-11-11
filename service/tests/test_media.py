@@ -110,6 +110,20 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(manager.cache_status()["active"], 0)
         self.assertFalse(list(manager.root.glob("*.part")))
 
+    def test_permission_failure_preserves_fixed_business_reason_without_raw_source_details(self):
+        from provider import ProviderError
+        class RestrictedSource(Provider):
+            def source(self, sid, episode, quality, cancelled):
+                raise ProviderError("MEDIA_ACCESS_RESTRICTED", "synthetic-upstream-context", 403)
+        manager = self.manager(RestrictedSource(self.source))
+        session = manager.create("12345678", 54)
+        wait_for(lambda: manager.pending == 0)
+        result = manager.get(session["id"])
+        self.assertEqual(result["phase"], "error")
+        self.assertIn("未开放这集的播放权限", result["error"])
+        self.assertNotIn("synthetic-upstream-context", result["error"])
+        self.assertNotIn("ProviderError", result["error"])
+
     def test_same_source_deduplicates_and_one_cancel_does_not_stop_other(self):
         provider = Provider(self.source, hold=True)
         manager = self.manager(provider)
@@ -329,6 +343,31 @@ class MediaTests(unittest.TestCase):
         self.assertIn(b"#EXTM3U", manager.read_file(second["id"], "index.m3u8"))
         manager.cancel(second["id"])
         self.assertEqual(manager.cache_status()["bytes"], 0)
+
+    def test_expired_session_reopens_complete_cached_job_without_redownloading(self):
+        provider = Provider(self.source)
+        manager = self.manager(provider)
+        first = manager.create("12345678", 54)
+        wait_for(lambda: manager.pending == 0)
+        original = manager.sessions[first["id"]].job
+        with manager.guard:
+            manager.sessions[first["id"]].accessed = time.time() - 901
+            manager._expire_sessions()
+        self.assertNotIn(first["id"], manager.sessions)
+        app = FastAPI()
+        mount_media(app, manager)
+        with TestClient(app) as client:
+            response = client.get("/media/session/" + first["id"])
+            self.assertEqual(response.status_code, 404)
+            detail = response.json()["detail"]["error"]
+            self.assertEqual(detail["code"], "MEDIA_SESSION_EXPIRED")
+            self.assertNotIn(first["id"], detail["message"])
+        second = manager.create("12345678", 54, start=12.5)
+        self.assertEqual(second["phase"], "complete")
+        self.assertTrue(second["cached"])
+        self.assertIs(manager.sessions[second["id"]].job, original)
+        self.assertEqual(provider.calls, 1)
+        self.assertIn(b"#EXTM3U", manager.read_file(second["id"], "index.m3u8"))
 
     def test_routes_enforce_token_and_reject_path_traversal(self):
         manager = self.manager()
