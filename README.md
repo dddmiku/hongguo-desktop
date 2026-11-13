@@ -1,8 +1,24 @@
 # 红果桌面
 
-一个从源码构建的 Windows 短剧客户端。界面采用独立设计：顶部导航、全宽内容、按需打开的右侧片库抽屉、真实海报主视觉与炭黑莓红主题，并提供完整的浅色与系统主题。
+在电脑大屏上看短剧：精选找剧、1080P 播放、实时搜索与多季连播。支持真人短剧、漫剧和 AI 剧，提供深色、浅色与系统主题。
 
-新客户端由 **Electron + React + TypeScript** 和独立 Python 内容服务组成。它不运行旧客户端的 EXE 或 `server.py`，也不再修改旧应用的内嵌前端。
+**[下载 Windows 安装包](https://github.com/dddmiku/hongguo-desktop/releases/latest)** · [使用与安装](#安装与使用) · [问题反馈](https://github.com/dddmiku/hongguo-desktop/issues) · [电视版](https://github.com/dddmiku/hongguo-tv)
+
+## 界面预览
+
+精选首页，把热播、新上架和真实海报放在一起，打开就能挑剧。
+
+[![精选发现首页](docs/screenshots/home.png)](docs/screenshots/home.png)
+
+<table>
+  <tr>
+    <td width="33%" align="center"><a href="docs/screenshots/playback.webp"><img src="docs/screenshots/playback.webp" alt="1080P 播放、弹幕与选集" width="300"></a><br><strong>1080P 播放与弹幕</strong><br>画质、倍速、选集随手切换</td>
+    <td width="33%" align="center"><a href="docs/screenshots/search.webp"><img src="docs/screenshots/search.webp" alt="输入剧名即时显示搜索建议与海报" width="300"></a><br><strong>边输入，边找剧</strong><br>实时建议，直接打开剧集</td>
+    <td width="33%" align="center"><a href="docs/screenshots/seasons.webp"><img src="docs/screenshots/seasons.webp" alt="六季作品的海报、真实集数和当前季" width="300"></a><br><strong>全部季一眼看全</strong><br>查看每季集数，直接切季</td>
+  </tr>
+</table>
+
+点击图片可查看原图。
 
 ## 安装与使用
 
@@ -35,7 +51,7 @@ Windows PC 的源码、下载、更新和反馈在本仓库独立维护。Androi
 
 题材、评论和可选画质以实际片源及上游接口为准。无网络时可查看本机记录；首次播放与在线同步仍需要联网。
 
-1.4.0 增加实时搜索建议与完整搜索分页，修复国内手机签名、后续集取流与断线恢复。2026-11-12 已完成构建、覆盖安装及原剧第 54、55、70 集的 PC 1080P 实测。各项检查与覆盖边界见 [验收记录](docs/verification.md)。
+1.4.0 增加实时搜索建议与完整搜索分页，修复国内手机签名、后续集取流与断线恢复。
 
 ### 旧版用户
 
@@ -48,6 +64,8 @@ Windows PC 的源码、下载、更新和反馈在本仓库独立维护。Androi
 导入不会把旧历史加入待上传队列，也不会重写云端进度。已核验的旧 SQLite 历史表没有秒级位置，导入后从对应集的开头继续；旧 WebView 的画质、倍速和自动连播偏好采用只读 LevelDB 解析导入，无法验证的数据保留新版默认值。详见 [迁移说明](docs/migration.md)。
 
 ## 从源码构建
+
+客户端由 **Electron + React + TypeScript** 和独立 Python 内容服务组成，界面与内容服务从源码构建。
 
 环境：Windows x64、Node.js 22 或更新版本、Python 3.11 或更新版本。
 
