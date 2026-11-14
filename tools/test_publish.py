@@ -188,7 +188,6 @@ class PublishTests(unittest.TestCase):
         release_dir = self.root / "release"
         release_dir.mkdir()
         (release_dir / "hongguo-1.1.0-setup.exe").write_bytes(self.asset.read_bytes())
-        (release_dir / "runtime-win-x64.zip").write_bytes(b"runtime-fixture")
         (self.root / "docs").mkdir()
         (self.root / "docs/release-notes.md").write_text("Release notes", encoding="utf-8")
         (self.root / "runtime-manifest.json").write_text(json.dumps({"version": "1.0.0"}), encoding="utf-8")
@@ -203,6 +202,9 @@ class PublishTests(unittest.TestCase):
         self.assertIn("/v1.1.0/hongguo-1.1.0-setup.exe", feed["platforms"]["windows-x86_64"]["url"])
         self.assertEqual(previous, old)
         self.assertEqual(make.call_args.args[0],P.REPO)
+        self.assertEqual([asset.name for asset in make.call_args.args[1]], [
+            "hongguo-1.1.0-setup.exe", "latest.json", "SHA256SUMS.txt"
+        ])
 
     def test_retired_repository_publication_is_blocked(self):
         with patch.object(P,"request") as remote,self.assertRaisesRegex(RuntimeError,"停止维护"):

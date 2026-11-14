@@ -287,7 +287,9 @@ def publish(secret, legacy=False):
     if not installer.is_file():
         raise RuntimeError("安装包尚未构建")
     archive = out / "runtime-win-x64.zip"
-    if not archive.is_file():
+    runtime_manifest = json.loads((ROOT / "runtime-manifest.json").read_text(encoding="utf-8"))
+    publish_runtime = runtime_manifest["version"] == VERSION
+    if publish_runtime and not archive.is_file():
         raise RuntimeError("可重建运行时尚未归档")
     digest = hashlib.sha256(installer.read_bytes()).hexdigest()
     notes = (ROOT / "docs/release-notes.md").read_text(encoding="utf-8")
@@ -299,8 +301,6 @@ def publish(secret, legacy=False):
     latest = out / "latest.json"
     latest.write_text(json.dumps(feed, ensure_ascii=False, indent=2), encoding="utf-8")
     checksums = out / "SHA256SUMS.txt"
-    runtime_manifest = json.loads((ROOT / "runtime-manifest.json").read_text(encoding="utf-8"))
-    publish_runtime = runtime_manifest["version"] == VERSION
     public_assets = [installer, archive] if publish_runtime else [installer]
     checksums.write_text("\n".join(hashlib.sha256(a.read_bytes()).hexdigest() + "  " + a.name for a in public_assets), encoding="utf-8")
     if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT).strip():
