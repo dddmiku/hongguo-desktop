@@ -6,9 +6,13 @@ import {hardwareHevc} from './capabilities';
 import {mediaPreload} from './MediaPreload';
 import {MediaSessionLease} from './MediaSessionLease';
 import {PlaybackCheckpoint} from './PlaybackCheckpoint';
+import {playbackBufferConfig} from './BufferBudget';
 
 export interface VideoDeck extends PreparedDeck { video: HTMLVideoElement; hls: Hls | null; sessionId: string; duration: number; sealed: boolean; }
 const aborted = () => new DOMException('Cancelled', 'AbortError');
+// Buffered HEVC with no compositor frame is a decode stall; try H.264 before the general timeout.
+const HEVC_FRAME_TIMEOUT_MS = 12000;
+const HEVC_FRAME_TIMEOUT_CODE = 'hevc-first-frame-timeout';
 
 /** A detached decoder slot. No account writes and no audible background playback. */
 export class HlsDeckLoader {
@@ -16,12 +20,13 @@ export class HlsDeckLoader {
   constructor(private videos: HTMLVideoElement[], private bridge: NativeBridge,
               private onFatal: (deck: VideoDeck, message: string) => void,
               private onPreparing:(target:PlaybackTarget,message:string)=>void=()=>{},
-              private playbackIntent:(deck:VideoDeck)=>boolean|undefined=()=>undefined) {}
+              private playbackIntent:(deck:VideoDeck)=>boolean|undefined=()=>undefined,
+              private playbackRate:()=>number=()=>1) {}
   async prepare(index: number, target: PlaybackTarget, signal: AbortSignal): Promise<VideoDeck> {
     if (signal.aborted) throw aborted();
     const video = this.videos[index];
     const previous = this.decks.get(index); if (previous) await previous.release();
-    let sessionId = '', engine: Hls | null = null, released = false, settled = false,leaseTimer:ReturnType<typeof setInterval>|undefined;
+    let sessionId = '', engine: Hls | null = null, released = false, settled = false,acceptHevc=false,usingHevc=false,leaseTimer:ReturnType<typeof setInterval>|undefined;
     let lease:MediaSessionLease|null=null,reconnectPlayback:(session:MediaSession,position:number)=>void=()=>{};
     const checkpoint=new PlaybackCheckpoint(video,target.start);
     const rememberPosition=()=>checkpoint.capture();
@@ -38,10 +43,11 @@ export class HlsDeckLoader {
     const abort = () => { void deck.release(); }; signal.addEventListener('abort', abort, { once: true });
     try {
       this.onPreparing(target,'正在连接片源');
-      const acceptHevc = !target.compatible && await hardwareHevc();
+      acceptHevc = !target.compatible && await hardwareHevc();
       if (signal.aborted || released) throw aborted();
       lease=new MediaSessionLease(this.bridge,{seriesId:target.seriesId,episode:target.episode,quality:target.quality,start:target.start,...(acceptHevc?{acceptHevc:true}:{})},signal);
       const session=await lease.open(mediaPreload(this.bridge).claim(target)??undefined);
+      usingHevc=acceptHevc&&session.videoCodec?.toLowerCase()==='hevc';
       sessionId = session.id; deck.sessionId = session.id;
       if (signal.aborted || released) throw aborted();
       leaseTimer=setInterval(()=>{
@@ -56,7 +62,8 @@ export class HlsDeckLoader {
       deck.duration=episodeDuration(session.duration,target.duration);
       this.onPreparing(target,'正在打开画面');
       await new Promise<void>((resolve, reject) => {
-        let priming = false, frameId = 0,lastBufferedFragment=-1,endSignalled=false;
+        let priming = false, frameId = 0,lastBufferedFragment=-1,endSignalled=false,mainFragmentBuffered=false;
+        let hevcFrameTimeout:ReturnType<typeof setTimeout>|undefined;
         reconnectPlayback=(replacement,position)=>{
           if(released||signal.aborted)return;
           const resume=this.playbackIntent(deck)??!video.paused;
@@ -79,10 +86,15 @@ export class HlsDeckLoader {
         const timeout = setTimeout(() => finish(new Error('视频解码超时，请重试')), 120000);
         const cleanup = () => {
           clearTimeout(timeout); signal.removeEventListener('abort', stop);
+          if(hevcFrameTimeout)clearTimeout(hevcFrameTimeout);
           for (const name of ['loadeddata', 'loadedmetadata', 'durationchange', 'canplay', 'seeked']) video.removeEventListener(name, ready);
           if (frameId && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(frameId);
         };
         const finish = (error?: Error) => { if (settled) return; settled = true; cleanup(); video.pause(); error ? reject(error) : resolve(); };
+        const watchHevcFrame=()=>{
+          if(!usingHevc||!mainFragmentBuffered||settled||hevcFrameTimeout)return;
+          hevcFrameTimeout=setTimeout(()=>finish(Object.assign(new Error('视频解码超时，请重试'),{code:HEVC_FRAME_TIMEOUT_CODE})),HEVC_FRAME_TIMEOUT_MS);
+        };
         const stop = () => finish(aborted());
         signal.addEventListener('abort', stop, { once: true });
         const ready = () => {
@@ -102,12 +114,12 @@ export class HlsDeckLoader {
         };
         for (const name of ['loadeddata', 'loadedmetadata', 'durationchange', 'canplay', 'seeked']) video.addEventListener(name, ready);
         if (Hls.isSupported()) {
-          engine = new Hls({ enableWorker: true, maxBufferLength: 6, maxMaxBufferLength: 12, maxBufferSize: 8*1024*1024, backBufferLength: 3,
+          engine = new Hls({ enableWorker: true, ...playbackBufferConfig(this.playbackRate(),true),
             startPosition:0,lowLatencyMode:false,liveSyncDuration:86400,liveMaxLatencyDuration:Infinity,maxLiveSyncPlaybackRate:1,
             manifestLoadingMaxRetry: 8, fragLoadingMaxRetry: 8, manifestLoadingRetryDelay: 800, fragLoadingRetryDelay: 800 });
           deck.hls = engine;
           engine.on(Hls.Events.MANIFEST_PARSED, ready); engine.on(Hls.Events.LEVEL_UPDATED,()=>{ready();finishStream();});
-          engine.on(Hls.Events.FRAG_BUFFERED,(_event,data)=>{if(data.frag.type==='main'){lastBufferedFragment=typeof data.frag.sn==='number'?data.frag.sn:-1;finishStream();}});
+          engine.on(Hls.Events.FRAG_BUFFERED,(_event,data)=>{if(data.frag.type==='main'){mainFragmentBuffered=true;lastBufferedFragment=typeof data.frag.sn==='number'?data.frag.sn:-1;watchHevcFrame();finishStream();}});
           engine.on(Hls.Events.ERROR, (_event, data) => {
             if (!data.fatal || released || signal.aborted) return;
             if(data.type===Hls.ErrorTypes.NETWORK_ERROR&&lease){
@@ -135,12 +147,13 @@ export class HlsDeckLoader {
         else finish(new Error('当前设备不支持视频播放'));
       });
       if (signal.aborted) throw aborted();
-      deck.hls?.stopLoad();
       signal.removeEventListener('abort', abort);
       return deck;
     } catch (error) {
       signal.removeEventListener('abort', abort); void deck.release();
-      if (target.compatible && !signal.aborted && (error as Error).message === '显卡解码暂不可用，正在切换兼容播放') return this.prepare(index,target,signal);
+      const hevcFrameStalled=usingHevc&&error instanceof Error&&(error as Error&{code?:string}).code===HEVC_FRAME_TIMEOUT_CODE;
+      if(hevcFrameStalled&&!signal.aborted)target.compatible=true;
+      if (!signal.aborted && (hevcFrameStalled || target.compatible && (error as Error).message === '显卡解码暂不可用，正在切换兼容播放')) return this.prepare(index,target,signal);
       if(error instanceof Error&&error.name!=='AbortError'){
         const readable=error.message.replace(/^Error invoking remote method (?:'[^'\r\n]+'|"[^"\r\n]+"): (?:Error: )?/, '');
         if(readable!==error.message)throw new Error(readable);

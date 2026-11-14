@@ -3,6 +3,7 @@ import { ArrowLeft, Play, Pause, SkipForward, Volume2, VolumeX, Maximize, Minimi
 import type { CommentsPage, Episode, Series, SeriesDetail, Settings } from '../../shared/contracts';
 import { SeamlessSwitcher, type PlaybackTarget } from '../playback/SeamlessSwitcher';
 import { HlsDeckLoader, type VideoDeck } from '../playback/HlsDeck';
+import {playbackBufferConfig} from '../playback/BufferBudget';
 import {availablePosition,knownDuration} from '../playback/timeline';
 import {PlaybackEnd} from '../playback/PlaybackEnd';
 import {SeasonContinuation,type SeasonDestination} from '../playback/SeasonContinuation';
@@ -13,6 +14,7 @@ import Danmaku from './Danmaku';
 import DanmakuPanel from './DanmakuPanel';
 import SeasonOverview from './SeasonOverview';
 import './Player.css';
+import './PlayerAutoSwitch.css';
 type Props = { detail: SeriesDetail; initialEpisode: number; initialPosition?: number; isActive?: boolean; settings: Settings; accountKey?: string; onClose: () => void; onSettings: (patch: Partial<Settings>) => void; onLibrary: () => void;onSeries?:(detail:SeriesDetail)=>void };
 type SeasonState={source:string;phase:'idle'|'looking'|'identified'|'preparing'|'ready'|'none'|'ambiguous'|'error';destination:SeasonDestination|null;error:string};
 const emptySeason=(source:string):SeasonState=>({source,phase:'idle',destination:null,error:''});
@@ -44,7 +46,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
   const seasonRef=useRef(seasonInfo);seasonRef.current=seasonInfo;
   const [favoriteBusy,setFavoriteBusy]=useState(false);
   const [active, setActive] = useState(0), [episode, setEpisode] = useState(initialEpisode), [pendingEpisode, setPendingEpisode] = useState<number | null>(null), [phase, setPhase] = useState('准备播放'), [error, setError] = useState('');
-  const [playing, setPlaying] = useState(false), [chrome, setChrome] = useState(true), [position, setPosition] = useState(initialPosition), [duration, setDuration] = useState(0), [buffered, setBuffered] = useState(0);
+  const [playing, setPlaying] = useState(false), [chrome, setChrome] = useState(true), [automaticPreparing,setAutomaticPreparing]=useState(false), [position, setPosition] = useState(initialPosition), [duration, setDuration] = useState(0), [buffered, setBuffered] = useState(0);
   const [muted, setMuted] = useState(false), [comments, setComments] = useState(false), [theater, setTheater] = useState(false), [favorite, setFavorite] = useState(false), [notice, setNotice] = useState(''), [fullscreen, setFullscreen] = useState(false);
   const [pendingPosition,setPendingPosition]=useState<number|null>(null);
   const [danmakuPanel, setDanmakuPanel] = useState(false), [danmakuRefresh, setDanmakuRefresh] = useState(0);
@@ -131,7 +133,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     const next=targetFor(data,index,start),displayed=current(),account=latest.current.accountKey;
     if(!force&&displayed?.target.seriesId===next.seriesId&&displayed.target.episode===index&&displayed.target.quality===next.quality&&Math.abs(displayed.target.start-start)<.1){hide();return;}
     rememberDetail(data);
-    requested.current = next;retryTarget.current=null; automaticSwitch.current = automatic;
+    requested.current = next;retryTarget.current=null; automaticSwitch.current = automatic;setAutomaticPreparing(automatic);
     setPendingPosition(displayed?.target.seriesId===next.seriesId&&displayed.target.episode===index&&Math.abs(start-displayed.video.currentTime)>.15?start:null);
     // Hidden windows pause the decoder without changing the user's play/pause choice.
     if(!automatic&&!keepPaused)shouldPlay.current=true;
@@ -141,11 +143,11 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
       const valid=()=>!closed.current&&mounted.current&&requested.current===next&&latest.current.accountKey===account&&allow()&&(!automatic||visible.current&&latest.current.isActive&&latest.current.settings.autoplay&&shouldPlay.current&&current()===displayed);
       const committed = await switcher.current?.select(next, automatic, force,valid);
 
-      if (!committed || closed.current){if(requested.current===next){requested.current=null;setPendingEpisode(null);setPendingPosition(null);}return;}
-      requested.current = null; setPendingEpisode(null);setPendingPosition(null); scheduleNext(committed);
+      if (!committed || closed.current){if(requested.current===next){requested.current=null;setPendingEpisode(null);setPendingPosition(null);setAutomaticPreparing(false);}return;}
+      requested.current = null; setPendingEpisode(null);setPendingPosition(null);setAutomaticPreparing(false);scheduleNext(committed);
     } catch (failure) {
       if (closed.current || requested.current !== next) return;
-      retryTarget.current=next;requested.current=null;setPendingEpisode(null);setPendingPosition(null); setPhase(''); setError((failure as Error).message || '视频准备失败，请重试'); setChrome(true);
+      retryTarget.current=next;requested.current=null;setPendingEpisode(null);setPendingPosition(null);setAutomaticPreparing(false); setPhase(''); setError((failure as Error).message || '视频准备失败，请重试'); setChrome(true);
     }
   }, [hide, saveDeck, scheduleNext,rememberDetail]);
   const selectEpisode=useCallback((index:number,automatic=false,start=0,keepPaused=false,force=false)=>{if(!automatic){cancelSeasonPick();seasonTransition.current=null;setContinuing(false);}return selectMedia(latest.current.detail,index,automatic,start,keepPaused,force);},[selectMedia,cancelSeasonPick]);
@@ -188,7 +190,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     cancelSeasonPick();seasonTransition.current=null;setContinuing(false);
     void saveDeck(deck);deck?.video.pause();deck?.hls?.stopLoad();
     switcher.current?.cancelPending();mediaPreload(window.hongguo).clear();
-    requested.current=null;setPendingEpisode(null);setPendingPosition(null);automaticSwitch.current=false;
+    requested.current=null;setPendingEpisode(null);setPendingPosition(null);automaticSwitch.current=false;setAutomaticPreparing(false);
     clearTimeout(hideTimer.current);
   },[cancelSeasonPick,saveDeck]);
   const resumePlayback=useCallback(()=>{
@@ -197,7 +199,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     if(deck){
       interruptedTarget.current=null;
       if(deck.target.quality!==latest.current.settings.quality){void selectEpisode(deck.target.episode,false,deck.video.currentTime,true);return;}
-      applySound(deck);deck.hls?.startLoad(deck.video.currentTime);scheduleNext(deck);
+      applySound(deck);if(deck.hls){Object.assign(deck.hls.config,playbackBufferConfig(latest.current.settings.rate,false));deck.hls.startLoad(deck.video.currentTime);}scheduleNext(deck);
       if(shouldPlay.current)void deck.video.play().catch(()=>{if(current()===deck){setPhase('点击开始播放');setChrome(true);}});
       else deck.video.pause();
     }else if(mounted.current&&!requested.current){
@@ -214,7 +216,8 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
       if(current()===deck&&deck.target.compatible&&!compatible.current){compatible.current=true;void selectEpisode(deck.target.episode,false,deck.video.currentTime,true,true);return;}
       if (current() === deck && mounted.current) { setError(message); setChrome(true); shouldPlay.current = false; }
     },(wanted,message)=>{if(mounted.current&&!current()&&requested.current?.episode===wanted.episode)setPhase(message);},
-      deck=>current()===deck&&visible.current&&shouldPlay.current);
+      deck=>current()===deck&&visible.current&&shouldPlay.current,
+      ()=>latest.current.settings.rate);
     const controller = new SeamlessSwitcher<VideoDeck>({
       prepare: async(index, wanted, signal) => {const account=latest.current.accountKey;const deck=await loader.prepare(index,wanted,signal);if(account!==latest.current.accountKey){await deck.release();throw new DOMException('Account changed','AbortError');}deckAccounts.current.set(deck,account);deck.video.dataset.seriesId=wanted.seriesId;deck.video.dataset.episode=String(wanted.episode);return deck;},
       present: (deck, previous, automatic) => {
@@ -223,7 +226,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
         if(destination&&latest.current.detail.series.id!==deck.target.seriesId){resetSeason(deck.target.seriesId);latest.current={...latest.current,detail:destination};setDetail(destination);setDanmakuStatus({loading:false,loaded:0,error:''});latest.current.onSeries?.(destination);}
         completion.current.reset();
         if(deck.target.compatible)compatible.current=true;
-        if(deck.hls){Object.assign(deck.hls.config,{maxBufferLength:18,maxMaxBufferLength:30,maxBufferSize:12*1024*1024,backBufferLength:8});if(visible.current)deck.hls.startLoad(deck.video.currentTime);}
+        if(deck.hls){Object.assign(deck.hls.config,playbackBufferConfig(latest.current.settings.rate,false));if(visible.current)deck.hls.startLoad(deck.video.currentTime);}
         deck.video.dataset.active = 'true'; deck.video.dataset.seriesId=deck.target.seriesId;deck.video.dataset.episode=String(deck.target.episode);deck.video.style.zIndex = '1'; deck.video.style.visibility = 'visible';
         if (previous) { previous.video.muted = true; previous.video.pause(); previous.video.dataset.active = 'false'; previous.video.style.zIndex = '0'; }
         const full=episodeDurations.current.get(`${deck.target.seriesId}:${deck.target.episode}`)||knownDuration(deck.duration);
@@ -244,9 +247,9 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     const deck = current(); if (!deck) return;
     if(!isActive)return;
     if (deck.target.quality !== settings.quality) { switcher.current?.cancelPending(); void selectEpisode(deck.target.episode, false, deck.video.currentTime, true); }
-    else applySound(deck);
+    else{applySound(deck);if(deck.hls)Object.assign(deck.hls.config,playbackBufferConfig(settings.rate,false));}
   }, [settings.rate, settings.volume, settings.quality, muted, selectEpisode, isActive]);
-  useEffect(()=>{if(!settings.autoplay&&seasonTransition.current?.automatic){shouldPlay.current=false;switcher.current?.cancelPending();requested.current=null;setPendingEpisode(null);setPendingPosition(null);setChrome(true);}},[settings.autoplay]);
+  useEffect(()=>{if(!settings.autoplay&&seasonTransition.current?.automatic){shouldPlay.current=false;switcher.current?.cancelPending();requested.current=null;setPendingEpisode(null);setPendingPosition(null);setAutomaticPreparing(false);setChrome(true);}},[settings.autoplay]);
   useEffect(() => {
     visible.current=isActive&&windowVisible.current;
     if(!isActive)suspendPlayback();else resumePlayback();
@@ -324,9 +327,11 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
   const canAdvance=detail.episodes.some(item=>item.index===nextEpisode()+1)||atSeasonEnd&&!['none','ambiguous'].includes(seasonInfo.phase);
   const playIntent=playing||(continuing||!!pickingSeason)&&shouldPlay.current;
   const retrySeason=()=>{if(seasonRef.current.destination?.detail){setError('');retryTarget.current=null;prepareSeason(seasonRef.current.destination);}else void lookupSeason(true);};
+  const stageClassName=['video-stage',chrome?'':'controls-hidden',automaticPreparing?'auto-switching':''].filter(Boolean).join(' ');
   return <div className={`player-page ${theater?'player-theater':''}`}>
     <div className="player-heading"><button className="btn" onClick={close}><ArrowLeft size={17}/> 返回</button><div><h2>{detail.series.title}</h2><span>第 {episode} 集 · 共 {detail.episodes.length} 集</span>{pendingEpisode&&<small className="switch-status">{pendingPosition!==null?`正在定位到 ${time(pendingPosition)}`:`正在准备第 ${pendingEpisode} 集，保留当前画面`}</small>}</div><button className={`icon-button player-favorite ${favorite?'active':''}`} title={favoriteBusy?'正在同步收藏':favorite?'取消收藏':'收藏'} aria-label={favoriteBusy?'正在同步收藏':favorite?'取消收藏':'收藏'} aria-pressed={favorite} disabled={favoriteBusy} onClick={()=>void changeFavorite()}>{favoriteBusy?<LoaderCircle className="spin" size={20}/>:<Heart size={20} fill={favorite?'currentColor':'none'}/>}</button></div>
-    <div className="playback-layout" ref={playbackLayout}><div className={`video-stage ${chrome?'':'controls-hidden'}`} onMouseMove={hide} onMouseLeave={()=>{if(playing&&!danmakuPanelRef.current)setChrome(false);}}>
+    <div className="playback-layout" ref={playbackLayout}><div className={stageClassName} onMouseMove={hide} onMouseLeave={()=>{if(playing&&!danmakuPanelRef.current)setChrome(false);}}>
+
       <div className="window-drag-region" aria-hidden="true" />
       {!current()&&!error&&<div className="player-startup-cover" aria-hidden="true">{detail.series.cover&&<img src={detail.series.cover} alt=""/>}<div/></div>}
       <div className="fullscreen-toolbar"><div><strong>{detail.series.title}</strong><span>第 {episode} 集</span></div><button className="icon-button" title={fullscreen?'退出全屏（Esc）':'退出窗口全屏（Esc）'} onClick={()=>{if(fullscreen)void toggleFullscreen();else toggleTheater();}}><Minimize size={20}/></button></div>
