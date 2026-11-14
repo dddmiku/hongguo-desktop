@@ -200,3 +200,15 @@
 正式安装与回归结果：`_work/signature-recovery/install/result.json`、`_work/domestic-playback-live/installed/result.json`、`_work/search-v2/installed-ui/result.json`。安装包与运行时随 1.4.0 发布携带 SHA-256 清单及更新 feed；安装包摘要为 29620b28a577910acc0b269f53a99afc0136ee00ce80325ff3fc73ffa91ec3c4，运行时摘要见 runtime-manifest.json。
 
 HLS 故障组使用本机受控回复，不表示所有公网中断均已覆盖；真实后续集组使用用户现有手机授权。官网仍可能拒绝后续集，保留手机优先与真实权限错误，不以其他集预览替代。
+
+# 1.4.1 窗口全屏
+
+2026-11-14，将原剧场模式调整为覆盖整个应用视口的窗口全屏。
+
+- 修复前 `node tools/qa-window-fullscreen.mjs` 已复现原按钮留下顶部 156 像素和右侧滚动条：1280×800 窗口中播放区为 1272×644，起点为 (0,156)。修复后播放区为 (0,0,1280,800)，导航隐藏且原视频节点继续播放。
+- `npm test` 的 169 项前端与主进程测试、类型检查、正式构建及 14 项发布工具测试通过。`qa-window-fullscreen.mjs` 的 15 项检查在源码构建和已安装 1.4.1 上通过，覆盖四边布局、窄窗口、Esc/T、滚动恢复、评论、弹幕设置、切集、手动暂停和系统全屏往返。该脚本以本地 HLS 样片驱动真实 Electron/Player，不冒充公网片源验收。
+- `qa-theater.mjs` 在源码构建及已安装 1.4.1 上读取真实片单并解码播放，2560×1440 播放区覆盖顶部导航，T 恢复普通区域，Esc 从系统全屏返回窗口全屏。截图在 `_work/theater-qa/`。
+- `qa-install-upgrade.mjs` 完成原 1.4.0 运行中覆盖安装，安装器退出码 0，1.4.1 服务健康。原账号、1496 条历史、5 个收藏及完整偏好保留；1 条真实待上传进度保留重试。安装后的 `app.asar` 与最终构建字节一致。
+- 安装包 `hongguo-1.4.1-setup.exe` 为 248372129 字节，SHA-256 为 `06fbd0f3d2c9445f338fbbf02e764114e289d36571c2232eab7338ba3d824795`。运行时继续使用 `runtime-manifest.json` 固定的 1.4.0 资产。
+
+证据：`_work/window-fullscreen/result.json`、`_work/window-fullscreen/installed-result.json`、`_work/theater-qa/result.json`、`_work/install-upgrade-qa/result.json`。这些是维护记录，不放入发布更新说明。
