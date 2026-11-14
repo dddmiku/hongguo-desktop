@@ -30,6 +30,14 @@ const geometry = () => page.evaluate(() => {
 const fillsWindow = data => Math.abs(data.layout.x) < 1 && Math.abs(data.layout.y) < 1 && Math.abs(data.layout.width - data.viewport.width) < 2 && Math.abs(data.layout.height - data.viewport.height) < 2 && data.header.height === 0;
 const hover = () => page.locator('.video-stage').hover({ position: { x: 15, y: 15 } });
 const windowButton = () => page.locator('.player-controls button').filter({ has: page.locator('svg.lucide-monitor') });
+const nativeHit = async (x, y) => {
+  const data = await instance.evaluate(({ BrowserWindow, screen }, point) => {
+    const window = BrowserWindow.getAllWindows()[0], content = window.getContentBounds();
+    const physical = screen.dipToScreenPoint({ x: content.x + Math.round(point.x), y: content.y + Math.round(point.y) });
+    return { handle: window.getNativeWindowHandle().readBigUInt64LE().toString(), ...physical };
+  }, { x, y });
+  return JSON.parse(execFileSync('python', [path.join(root, 'tools/qa-window-hit-test.py')], { input: JSON.stringify(data), encoding: 'utf8', windowsHide: true, timeout: 5000 })).hit;
+};
 try {
   instance = await electron.launch({ ...(installed ? { executablePath: path.join(process.env.LOCALAPPDATA, 'Programs/hongguo-desktop/红果桌面.exe'), args: [] } : { args: ['.'], cwd: root }), env: { ...process.env, HG_TEST_DATA_DIR: path.join(out, installed ? 'installed-profile' : 'profile'), HG_TEST_BACKGROUND: '1', TEMP: out, TMP: out }, timeout: 60000 });
   page = await instance.firstWindow();
@@ -68,6 +76,14 @@ try {
   await page.screenshot({ path: path.join(out, installed ? 'installed-window-fullscreen.png' : 'window-fullscreen.png') });
   check('窗口全屏覆盖顶部导航和剧名栏并铺满四边', fillsWindow(theater), theater);
   check('窗口全屏不改变系统窗口尺寸和原解码器', !theater.fullscreen && theater.sameVideo && !theater.paused && JSON.stringify(await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds())) === JSON.stringify(bounds), { normalTime: normal.time, currentTime: theater.time });
+  const topHit = await nativeHit(200, 16);
+  check('窗口全屏顶部被Windows识别为可拖动标题区', topHit === 2, { hit: topHit });
+  await page.mouse.move(400, 200);
+  await page.waitForSelector('.video-stage.controls-hidden');
+  check('控制栏收起后顶部仍可拖动', await nativeHit(200, 16) === 2);
+  await hover();
+  const exitBounds = await page.getByTitle('退出窗口全屏（Esc）', { exact: true }).boundingBox();
+  check('退出按钮不在拖动区内', await nativeHit(exitBounds.x + exitBounds.width / 2, exitBounds.y + exitBounds.height / 2) === 1);
   await page.keyboard.press('Control+k');
   check('隐藏的搜索框不会抢走窗口全屏快捷键', await search.evaluate(node => document.activeElement !== node));
   await page.keyboard.press('Escape');
@@ -78,6 +94,7 @@ try {
   check('普通模式存在实际滚动位置', scroll > 0, { scroll });
   await page.keyboard.press('t'); await page.waitForSelector('.player-theater');
   await page.keyboard.press('t'); await page.waitForFunction(() => !document.querySelector('.player-theater'));
+  await page.waitForFunction(expected => Math.abs(document.querySelector('.content-scroll').scrollTop - expected) < 1, scroll);
   check('T退出后恢复原来的浏览位置', Math.abs(await page.locator('.content-scroll').evaluate(node => node.scrollTop) - scroll) < 1);
   await page.keyboard.press('t'); await page.waitForSelector('.player-theater');
   await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(960, 680));
@@ -88,6 +105,7 @@ try {
   await page.getByLabel('关闭评论', { exact: true }).click();
   await page.keyboard.press('f'); await page.waitForFunction(() => !!document.fullscreenElement);
   check('窗口全屏可以继续进入系统全屏', await page.locator('.playback-layout').evaluate(node => document.fullscreenElement === node));
+  check('系统全屏不保留窗口拖动区', !await page.locator('.window-drag-region').isVisible() && await nativeHit(200, 16) === 1);
   await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.fullscreenElement);
   check('系统全屏退出后仍保留窗口全屏', await page.locator('.player-theater').count() === 1 && fillsWindow(await geometry()));
   await hover(); await page.getByTitle('弹幕设置', { exact: true }).click();
