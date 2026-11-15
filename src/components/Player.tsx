@@ -215,8 +215,11 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     const loader = new HlsDeckLoader(elements, window.hongguo, (deck, message) => {
       if(current()===deck&&deck.target.compatible&&!compatible.current){compatible.current=true;void selectEpisode(deck.target.episode,false,deck.video.currentTime,true,true);return;}
       if (current() === deck && mounted.current) { setError(message); setChrome(true); shouldPlay.current = false; }
-    },(wanted,message)=>{if(mounted.current&&!current()&&requested.current?.episode===wanted.episode)setPhase(message);},
-      deck=>current()===deck&&visible.current&&shouldPlay.current,
+    },(wanted,message)=>{
+      const deck=current();
+      if(mounted.current&&(!deck&&requested.current===wanted||deck?.target===wanted&&!requested.current))setPhase(message);
+    },
+      deck=>current()===deck&&visible.current&&shouldPlay.current&&!closed.current&&!requested.current&&!seasonTransition.current&&!seasonPick.current,
       ()=>latest.current.settings.rate);
     const controller = new SeamlessSwitcher<VideoDeck>({
       prepare: async(index, wanted, signal) => {const account=latest.current.accountKey;const deck=await loader.prepare(index,wanted,signal);if(account!==latest.current.accountKey){await deck.release();throw new DOMException('Account changed','AbortError');}deckAccounts.current.set(deck,account);deck.video.dataset.seriesId=wanted.seriesId;deck.video.dataset.episode=String(wanted.episode);return deck;},
@@ -265,7 +268,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     const nextPlay=pending?!shouldPlay.current:!!current()?.video.paused;
     cancelSeasonPick();
     const deck = current(); if (!deck || error) return;
-    shouldPlay.current = nextPlay; if (shouldPlay.current && visible.current) {deckAccounts.current.set(deck,latest.current.accountKey);completion.current.reset(); applySound(deck);if(!requested.current&&!seasonTransition.current)void deck.video.play().catch(() => {});scheduleNext(deck); } else deck.video.pause();setPlaying(shouldPlay.current&&!deck.video.paused); hide();
+    shouldPlay.current = nextPlay; if (shouldPlay.current && visible.current) {deckAccounts.current.set(deck,latest.current.accountKey);completion.current.reset(); applySound(deck);if(!requested.current&&!seasonTransition.current)void deck.video.play().catch(() => {});scheduleNext(deck); } else {deck.video.pause();setPhase('');}setPlaying(shouldPlay.current&&!deck.video.paused); hide();
   }, [error, hide,scheduleNext,cancelSeasonPick]);
   useEffect(() => window.hongguo.onVisibility(value => {
     windowVisible.current=value;visible.current=value&&latest.current.isActive;
@@ -338,10 +341,11 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
       {[0,1].map(index=><video key={index} ref={element=>{videos.current[index]=element;}} className="decoder-video" data-active={active===index?'true':'false'} data-series-id={active===index?detail.series.id:undefined} data-episode={active===index?episode:undefined} playsInline
         onClick={()=>{if(current()?.index!==index)return;clearTimeout(clickTimer.current);clickTimer.current=setTimeout(toggle,220);}} onDoubleClick={()=>{if(current()?.index!==index)return;clearTimeout(clickTimer.current);void toggleFullscreen();}}
         onTimeUpdate={()=>onTime(index)} onDurationChange={()=>onTime(index)} onProgress={()=>onTime(index)} onPlaying={()=>{if(current()?.index!==index)return;setPlaying(true);setPhase('');if(automaticSwitch.current){automaticSwitch.current=false;setChrome(false);}else hide();}}
-      onPause={()=>{const deck=current();if(deck?.index!==index)return;setPlaying(false);const naturallyEnding=latest.current.settings.autoplay&&deck.video.ended;if(!naturallyEnding&&!automaticSwitch.current&&!requested.current){setChrome(true);void saveDeck(deck);}}} onWaiting={()=>{if(current()?.index===index&&!requested.current)setPhase('缓冲中');}} onEnded={()=>ended(index)}/>)}
+      onPause={()=>{const deck=current();if(deck?.index!==index)return;setPlaying(false);const naturallyEnding=latest.current.settings.autoplay&&deck.video.ended;if(!naturallyEnding&&!automaticSwitch.current&&!requested.current){if(!shouldPlay.current)setPhase('');setChrome(true);void saveDeck(deck);}}} onWaiting={()=>{if(current()?.index===index&&!requested.current&&shouldPlay.current)setPhase('缓冲中');}} onEnded={()=>ended(index)}/>)}
       {episodeMeta && <Danmaku key={`${detail.series.id}:${episode}:${accountKey}`} seriesId={detail.series.id} episode={episode} vid={episodeMeta.vid} accountKey={accountKey} isActive={isActive} getVideo={activeVideo} initialTime={detail.series.id===starting.detail.series.id&&episode===starting.episode?starting.position:0} metadataDuration={duration || episodeMeta.duration || 0} preferences={danmakuSettings} refreshToken={danmakuRefresh} onStatus={setDanmakuStatus}/>}
       {notice&&<div className="player-notice player-feedback" role="status">{favoriteBusy&&<LoaderCircle className="spin" size={17}/>}<span>{notice}</span><button aria-label="关闭播放提示" onClick={()=>setNotice('')}><X size={15}/></button></div>}
       {phase&&!error&&!current()&&<div className="player-status"><div className={playing?'':'spinner'}/><span>{phase}</span>{phase==='点击开始播放'&&<button className="btn primary" onClick={toggle}><Play size={18}/>播放</button>}</div>}
+      {phase&&!error&&current()&&!automaticPreparing&&(phase==='缓冲中'||phase.includes('恢复')||phase.includes('连接暂时中断'))&&<div className="player-recovery-status" role="status"><LoaderCircle size={16} className="spin"/>{phase}</div>}
       {error&&<div className={`player-error ${current()?"switch-error":""}`}><RotateCcw size={28}/><h3>暂时无法播放</h3><p>{error}</p><button className="btn primary" onClick={()=>{const wanted=retryTarget.current??requested.current??current()?.target??target(starting.episode,starting.position),data=metadata.current.get(wanted.seriesId);if(data)void selectMedia(data,wanted.episode,false,wanted.start,false,true);}}>重试当前集</button></div>}
       <div className="player-controls" onClick={e=>{const target=e.target as HTMLElement;if(target.closest('button'))target.closest('button')?.blur();hide();}}>
         {danmakuPanel && <DanmakuPanel preferences={danmakuSettings} status={danmakuStatus} onChange={updateDanmaku} onClose={closeDanmakuPanel} onRefresh={() => setDanmakuRefresh(value => value + 1)} onInteraction={hide}/>}

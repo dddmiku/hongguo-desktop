@@ -56,6 +56,83 @@ describe('播放会话续租和过期恢复',()=>{
     expect(request.mock.calls.filter(([,options])=>options?.method==='POST')).toHaveLength(1);
     lease.release();
   });
+  it.each(['error','cancelled'] as const)('同一活动会话变为 %s 后按真实播放进度重建原集',async phase=>{
+    const request=vi.fn(async(path:string,options?:{method?:string;body?:unknown})=>{
+      if(path==='/media/session'&&options?.method==='POST')return ready('renewed');
+      if(path==='/media/session/first'&&!options)return {...ready('first'),phase,error:'视频转换失败，请重试当前集'};
+      return {};
+    });
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);
+    await lease.open(Promise.resolve(ready('first')));
+    await expect(lease.read(23.75)).resolves.toMatchObject({id:'renewed',phase:'complete'});
+    expect(request.mock.calls.filter(([,options])=>options?.method==='POST')).toEqual([
+      ['/media/session',{method:'POST',body:{...body,start:23.75}}],
+    ]);
+    expect(request.mock.calls.filter(([path,options])=>path==='/media/session/first'&&options?.method==='DELETE')).toHaveLength(1);
+    lease.release();
+  });
+  it('心跳返回准备中会话时等待可播放状态，不能交付仍在准备的会话',async()=>{
+    vi.useFakeTimers();let reads=0;
+    const request=vi.fn(async(path:string,options?:{method?:string})=>!options
+      ? {...ready('first'),phase:reads++===0?'preparing':'complete'}
+      : {});
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);
+    await lease.open(Promise.resolve(ready('first')));
+    const reading=lease.read(23.75);
+    await vi.advanceTimersByTimeAsync(150);
+    await expect(reading).resolves.toMatchObject({id:'first',phase:'complete'});
+    expect(request.mock.calls.filter(([,options])=>!options)).toHaveLength(2);
+    lease.release();
+  });
+  it('心跳轮询的晚到结果不能恢复已被替换的旧会话',async()=>{
+    vi.useFakeTimers();let reads=0;let complete!:(value:MediaSession)=>void;
+    const pending=new Promise<MediaSession>(resolve=>complete=resolve);
+    const request=vi.fn(async(path:string,options?:{method?:string})=>{
+      if(options?.method==='POST')return ready('renewed');
+      if(path==='/media/session/first'&&!options){
+        if(reads++===0)return {...ready('first'),phase:'preparing'};
+        if(reads===2)return pending;
+        throw new Error('播放会话已过期，请重新连接');
+      }
+      return {};
+    });
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);
+    await lease.open(Promise.resolve(ready('first')));
+    const old=lease.read(23.75);
+    await vi.advanceTimersByTimeAsync(150);
+    expect((await lease.read(25)).id).toBe('renewed');
+    complete(ready('first'));
+    expect((await old).id).toBe('renewed');expect(lease.id).toBe('renewed');lease.release();
+  });
+  it('心跳等待期间本地任务失败也只重建一次，第二次失败给出可读错误',async()=>{
+    vi.useFakeTimers();let firstReads=0;
+    const request=vi.fn(async(path:string,options?:{method?:string})=>{
+      if(options?.method==='POST')return ready('renewed');
+      if(path==='/media/session/first'&&!options)return {...ready('first'),phase:firstReads++===0?'preparing':'error'};
+      if(path==='/media/session/renewed'&&!options)return {...ready('renewed'),phase:'error'};
+      return {};
+    });
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);
+    await lease.open(Promise.resolve(ready('first')));
+    const reading=lease.read(23.75);
+    await vi.advanceTimersByTimeAsync(150);
+    await expect(reading).resolves.toMatchObject({id:'renewed',phase:'complete'});
+    await expect(lease.read(25)).rejects.toThrow('播放连接已失效，请重试当前集');
+    expect(request.mock.calls.filter(([,options])=>options?.method==='POST')).toHaveLength(1);
+    lease.release();
+  });
+  it.each(['error','cancelled'] as const)('重建的会话再次返回 %s 时停止恢复并报告失败',async phase=>{
+    const request=vi.fn(async(path:string,options?:{method?:string})=>{
+      if(options?.method==='POST')return {...ready('renewed'),phase,error:'视频转换失败，请重试当前集'};
+      if(!options)return {...ready('first'),phase:'error'};
+      return {};
+    });
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);
+    await lease.open(Promise.resolve(ready('first')));
+    await expect(lease.read(23.75)).rejects.toThrow('播放连接已失效，请重试当前集');
+    expect(request.mock.calls.filter(([,options])=>options?.method==='POST')).toHaveLength(1);
+    lease.release();
+  });
   it('取消正在返回的新会话后立即释放，不能交付已经关闭的播放器',async()=>{
     let complete!:(value:MediaSession)=>void;
     const pending=new Promise<MediaSession>(resolve=>complete=resolve);
@@ -67,11 +144,18 @@ describe('播放会话续租和过期恢复',()=>{
     await error;
     expect(request.mock.calls.filter(([path,options])=>path==='/media/session/late'&&options?.method==='DELETE')).toHaveLength(1);
   });
-  it('准备错误和断网保持业务错误，不能把任何失败当成租约过期重试',async()=>{
-    const request=vi.fn(async()=>{throw new Error('内容服务连接超时');});
+  it.each(['内容服务连接超时','账号已切换，请重新播放当前集','登录态已失效，请重新登录后播放'])('请求失败 %s 保持业务错误，不自动重建租约',async message=>{
+    const request=vi.fn(async()=>{throw new Error(message);});
     const lease=new MediaSessionLease({request},body,new AbortController().signal);
     await lease.open(Promise.resolve(ready('normal')));
-    await expect(lease.read()).rejects.toThrow('内容服务连接超时');
+    await expect(lease.read()).rejects.toThrow(message);
     expect(request).toHaveBeenCalledOnce();lease.release();
+  });
+  it('首次准备失败保持原业务错误，不能自动重试被拒绝的播放请求',async()=>{
+    const request=vi.fn(async()=>({}));
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);
+    await expect(lease.open(Promise.resolve({...ready('denied'),phase:'error',error:'官网暂未开放这集的播放权限，已保留当前进度'})))
+      .rejects.toThrow('官网暂未开放这集的播放权限，已保留当前进度');
+    expect(request).not.toHaveBeenCalled();lease.release();
   });
 });

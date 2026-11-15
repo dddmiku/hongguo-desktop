@@ -7,6 +7,7 @@ import {mediaPreload} from './MediaPreload';
 import {MediaSessionLease} from './MediaSessionLease';
 import {PlaybackCheckpoint} from './PlaybackCheckpoint';
 import {playbackBufferConfig} from './BufferBudget';
+import {PlaybackRecovery} from './PlaybackRecovery';
 
 export interface VideoDeck extends PreparedDeck { video: HTMLVideoElement; hls: Hls | null; sessionId: string; duration: number; sealed: boolean; }
 const aborted = () => new DOMException('Cancelled', 'AbortError');
@@ -26,15 +27,18 @@ export class HlsDeckLoader {
     if (signal.aborted) throw aborted();
     const video = this.videos[index];
     const previous = this.decks.get(index); if (previous) await previous.release();
-    let sessionId = '', engine: Hls | null = null, released = false, settled = false,acceptHevc=false,usingHevc=false,leaseTimer:ReturnType<typeof setInterval>|undefined;
-    let lease:MediaSessionLease|null=null,reconnectPlayback:(session:MediaSession,position:number)=>void=()=>{};
+    let sessionId = '', engine: Hls | null = null, released = false, settled = false,acceptHevc=false,usingHevc=false,leaseTimer:ReturnType<typeof setInterval>|undefined,recoveryTimer:ReturnType<typeof setInterval>|undefined;
+    let lease:MediaSessionLease|null=null,reconnectPlayback:(session:MediaSession,position:number)=>void=()=>{},applyReplacement:(session:MediaSession,position:number)=>void=()=>{},requestReconnect:(position:number)=>void=()=>{};
+    let restoreListener:(()=>void)|undefined,reconnecting=false,reconnectPosition=0,reconnectHealthySince:number|null=null;
+    const recovery=new PlaybackRecovery();
     const checkpoint=new PlaybackCheckpoint(video,target.start);
     const rememberPosition=()=>checkpoint.capture();
     const positionEvents=['timeupdate','seeking','seeked','playing','pause'];
     for(const event of positionEvents)video.addEventListener(event,rememberPosition);
     video.pause(); video.muted = true; video.volume = 0; video.style.visibility = 'visible';
     const deck: VideoDeck = { index, target, video, hls: null, sessionId: '', duration:episodeDuration(0,target.duration),sealed:false,release: () => {
-      if (released) return; released = true; clearInterval(leaseTimer);engine?.destroy();
+      if (released) return; released = true; clearInterval(leaseTimer);clearInterval(recoveryTimer);engine?.destroy();
+      if(restoreListener)video.removeEventListener('canplay',restoreListener);
       for(const event of positionEvents)video.removeEventListener(event,rememberPosition);
       if (this.decks.get(index) === deck) { this.decks.delete(index); video.pause(); video.removeAttribute('src'); video.load(); }
       lease?.release();
@@ -54,7 +58,7 @@ export class HlsDeckLoader {
         if(released||!lease)return;
         const position=checkpoint.read();
         void lease.read(position).then(current=>{
-          if(!released&&current.id!==deck.sessionId){sessionId=current.id;deck.sessionId=current.id;reconnectPlayback(current,position);}
+          if(!released)applyReplacement(current,position);
         }).catch(error=>{if(!released&&error instanceof Error&&error.message==='播放连接已失效，请重试当前集')this.onFatal(deck,error.message);});
       },60000);
       if (signal.aborted) throw aborted();
@@ -64,18 +68,47 @@ export class HlsDeckLoader {
       await new Promise<void>((resolve, reject) => {
         let priming = false, frameId = 0,lastBufferedFragment=-1,endSignalled=false,mainFragmentBuffered=false;
         let hevcFrameTimeout:ReturnType<typeof setTimeout>|undefined;
-        reconnectPlayback=(replacement,position)=>{
-          if(released||signal.aborted)return;
+        const restorePosition=(position:number)=>{
           const resume=this.playbackIntent(deck)??!video.paused;
-          const restore=()=>{
+          if(restoreListener)video.removeEventListener('canplay',restoreListener);
+          restoreListener=()=>{
+            restoreListener=undefined;
             if(released||signal.aborted)return;
-            if(Number.isFinite(video.duration))video.currentTime=Math.min(position,Math.max(0,video.duration-.2));
+            if(Number.isFinite(video.duration)&&video.duration>=position&&Math.abs(video.currentTime-position)>.1)video.currentTime=position;
             if(this.playbackIntent(deck)??resume)void video.play().catch(()=>{});else video.pause();
           };
-          video.addEventListener('canplay',restore,{once:true});
+          video.addEventListener('canplay',restoreListener,{once:true});
+        };
+        reconnectPlayback=(replacement,position)=>{
+          if(released||signal.aborted)return;
+          restorePosition(position);
+          usingHevc=acceptHevc&&replacement.videoCodec?.toLowerCase()==='hevc';
           lastBufferedFragment=-1;endSignalled=false;deck.sealed=false;
           if(engine){engine.config.startPosition=position;engine.loadSource(replacement.url);engine.startLoad(position);}
           else video.src=replacement.url;
+        };
+        applyReplacement=(replacement,position)=>{
+          if(released||signal.aborted||replacement.id===deck.sessionId)return;
+          sessionId=replacement.id;deck.sessionId=replacement.id;
+          reconnecting=true;reconnectPosition=position;reconnectHealthySince=null;
+          recovery.rebase(performance.now(),position);
+          reconnectPlayback(replacement,position);
+        };
+        requestReconnect=(position)=>{
+          if(released||signal.aborted||reconnecting||!lease)return;
+          reconnecting=true;reconnectPosition=position;reconnectHealthySince=null;
+          recovery.rebase(performance.now(),position);
+          this.onPreparing(target,'播放连接暂时中断，正在重新连接');
+          void lease.reconnect(position).then(replacement=>{
+            if(released||signal.aborted)return;
+            if(replacement.id===deck.sessionId){reconnecting=false;return;}
+            applyReplacement(replacement,position);
+          }).catch(error=>{
+            reconnecting=false;
+            if(released||signal.aborted)return;
+            const message=error instanceof Error?error.message:'播放连接暂时不可用，请重试当前集';
+            if(!settled)finish(new Error(message));else this.onFatal(deck,message);
+          });
         };
         const finishStream=()=>{
           const details=engine?.levels[engine.currentLevel]?.details;
@@ -124,14 +157,7 @@ export class HlsDeckLoader {
             if (!data.fatal || released || signal.aborted) return;
             if(data.type===Hls.ErrorTypes.NETWORK_ERROR&&lease){
               const position=checkpoint.read();
-              this.onPreparing(target,'播放连接暂时中断，正在重新连接');
-              void lease.reconnect(position).then(replacement=>{
-                if(released||signal.aborted||replacement.id===deck.sessionId)return;sessionId=replacement.id;deck.sessionId=replacement.id;reconnectPlayback(replacement,position);
-              }).catch(error=>{
-                if(released||signal.aborted)return;
-                const text=error instanceof Error?error.message:'播放连接暂时不可用，请重试当前集';
-                if(!settled)finish(new Error(text));else this.onFatal(deck,text);
-              });return;
+              requestReconnect(position);return;
             }
             if (data.type === Hls.ErrorTypes.MEDIA_ERROR && acceptHevc) {
               target.compatible = true;
@@ -147,6 +173,46 @@ export class HlsDeckLoader {
         else finish(new Error('当前设备不支持视频播放'));
       });
       if (signal.aborted) throw aborted();
+      recoveryTimer=setInterval(()=>{
+        if(released||signal.aborted)return;
+        const enabled=this.playbackIntent(deck)===true;
+        const position=checkpoint.read();
+        let bufferedAhead=0;
+        for(let i=0;i<video.buffered.length;i++){
+          if(video.buffered.start(i)<=position+.05&&video.buffered.end(i)>position){bufferedAhead=video.buffered.end(i)-position;break;}
+        }
+        // The sealed final samples belong to PlaybackEnd's short completion check.
+        const atTail=deck.sealed&&Number.isFinite(video.duration)&&video.duration-position<=.35;
+        const action=recovery.inspect({time:position,now:performance.now(),enabled:enabled&&(!atTail||video.paused),paused:video.paused,ended:video.ended,seeking:video.seeking,bufferedAhead});
+        if(action==='failed'){this.onFatal(deck,'播放停滞，自动恢复未成功，请重试当前集');return;}
+        if(reconnecting){
+          if(action==='resume')void video.play().catch(()=>{});
+          if(!video.paused&&position>=reconnectPosition+.5){
+            reconnectHealthySince??=performance.now();
+            if(performance.now()-reconnectHealthySince>=1000)reconnecting=false;
+          }else reconnectHealthySince=null;
+          return;
+        }
+        if(!action)return;
+        if(action==='resume'){void video.play().catch(()=>{});return;}
+        this.onPreparing(target,'播放暂时中断，正在恢复');
+        if(action==='recover'){
+          if(usingHevc&&bufferedAhead>.5){target.compatible=true;this.onFatal(deck,'显卡解码暂不可用，正在切换兼容播放');return;}
+          if(engine){
+            if(bufferedAhead>.5){
+              if(restoreListener)video.removeEventListener('canplay',restoreListener);
+              restoreListener=()=>{restoreListener=undefined;if(!released&&!signal.aborted&&(this.playbackIntent(deck)??false))void video.play().catch(()=>{});};
+              video.addEventListener('canplay',restoreListener,{once:true});
+              engine.recoverMediaError();
+            }else engine.startLoad(position);
+          }
+          if(!video.error)void video.play().catch(()=>{});
+          return;
+        }
+        if(action==='reconnect'&&lease){
+          requestReconnect(position);
+        }
+      },250);
       signal.removeEventListener('abort', abort);
       return deck;
     } catch (error) {
