@@ -54,6 +54,7 @@ class _Job:
     accept_hevc: bool = False
     delivery: str = ""
     video_codec: str = ""
+    size_bytes: int = 0
 
 
 @dataclass
@@ -131,6 +132,7 @@ class MediaManager:
                     text = (path / "index.m3u8").read_text(encoding="utf-8")
                     if "#EXT-X-ENDLIST" in text:
                         job.duration = sum(float(value) for value in re.findall(r"^#EXTINF:([0-9.]+),", text, re.MULTILINE))
+                job.size_bytes = self._size(path)
                 job.ready.set()
                 job.done.set()
                 self.jobs[job.key] = job
@@ -247,8 +249,9 @@ class MediaManager:
             if session is None:
                 raise KeyError(identifier)
             self._release(session)
-            self._prune()
-            return self._view(session)
+            result = self._view(session)
+        self._prune()
+        return result
 
     @staticmethod
     def _terminate(process):
@@ -405,6 +408,9 @@ class MediaManager:
 
     def _promote(self, job):
         """Windows 扫描/读句柄短暂未分享DELETE时，保留完整产物等待其释放。"""
+        # FFmpeg has finished and metadata is written. Completed directories are
+        # immutable; measure once without preventing the current HLS read.
+        size_bytes = self._size(job.directory)
         destination = self.root / job.key
         deadline = time.monotonic() + 1.0
         while True:
@@ -419,6 +425,7 @@ class MediaManager:
                         raise
                 else:
                     job.directory = destination
+                    job.size_bytes = size_bytes
                     job.phase = "complete"
                     job.accessed = time.time()
                     return
@@ -445,7 +452,7 @@ class MediaManager:
             job.done.set()
             if job.phase in ("error", "cancelled") and not job.refs and self.jobs.get(job.key) is job:
                 self.jobs.pop(job.key)
-            self._prune()
+        self._prune()
 
     @staticmethod
     def _size(directory):
@@ -459,27 +466,35 @@ class MediaManager:
         with self.guard:
             self._expire_sessions()
             jobs = [job for job in self.jobs.values() if job.phase == "complete"]
-            total = sum(self._size(job.directory) for job in jobs)
+            total = sum(job.size_bytes for job in jobs)
             for job in sorted(jobs, key=lambda item: item.accessed):
                 if not clear and total <= self.limit:
                     break
                 if job.refs:
                     continue
-                size = self._size(job.directory)
+                size = job.size_bytes
                 self._remove(job.directory)
                 if self.jobs.get(job.key) is job:
                     self.jobs.pop(job.key)
                 total -= size
 
     def cache_status(self):
+        self._prune()
         with self.guard:
-            self._prune()
             jobs = [job for job in self.jobs.values()
                     if job.phase in ("preparing", "ready", "complete")]
-            return {"bytes": sum(self._size(job.directory) for job in jobs),
+            growing = [(job.key, job.directory) for job in jobs if job.phase != "complete"]
+        # In-progress segments still grow. Sample them outside the session lock,
+        # and prefer the recorded final size if promotion finished meanwhile.
+        sizes = {key: self._size(directory) for key, directory in growing}
+        with self.guard:
+            current = [job for job in jobs if self.jobs.get(job.key) is job
+                       and job.phase in ("preparing", "ready", "complete")]
+            return {"bytes": sum(job.size_bytes if job.phase == "complete" else sizes.get(job.key, 0)
+                                 for job in current),
                     "limit": self.limit,
-                    "entries": sum(job.phase == "complete" for job in jobs),
-                    "active": sum(bool(job.refs) for job in jobs)}
+                    "entries": sum(job.phase == "complete" for job in current),
+                    "active": sum(bool(job.refs) for job in current)}
 
     def clear_cache(self):
         self._prune(clear=True)
@@ -495,7 +510,7 @@ class MediaManager:
             pending = self.root / "settings.json.part"
             pending.write_text(json.dumps({"limit": self.limit}), encoding="utf-8")
             pending.replace(target)
-            return self.cache_status()
+        return self.cache_status()
 
     def read_file(self, identifier, filename, wait_seconds=15):
         if not _FILE.fullmatch(filename):

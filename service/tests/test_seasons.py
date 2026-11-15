@@ -474,7 +474,7 @@ class SeasonTests(unittest.TestCase):
         self.assertFalse(resolver.values)
 
     def test_search_pagination_stall_keeps_partial_information_without_complete_cache(self):
-        resolver, sdk, _ = self.resolver([metadata(CURRENT, "春风")])
+        resolver, sdk, _ = self.resolver([metadata(CURRENT, "春风")], clock=lambda: 1000.0)
         def stuck(method, path, **kwargs):
             if method == "GET":
                 return {"search_tabs": [{"tab_type": 29, "data": sdk.search_rows, "has_more": True, "next_offset": 0}]}
