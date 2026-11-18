@@ -189,7 +189,9 @@ class PublishTests(unittest.TestCase):
         release_dir.mkdir()
         (release_dir / "hongguo-1.1.0-setup.exe").write_bytes(self.asset.read_bytes())
         (self.root / "docs").mkdir()
-        (self.root / "docs/release-notes.md").write_text("Release notes", encoding="utf-8")
+        current_notes = "红果桌面 1.1.0 · 2026-11-18 · 评论加载修复\n\n- 修复当前版本评论加载。\n\n下载 hongguo-1.1.0-setup.exe 覆盖安装。"
+        old_notes = "红果桌面 1.0.0 · 2026-11-16 · 播放优化\n\n- 旧版本播放调整。\n\n下载 hongguo-1.0.0-setup.exe 覆盖安装。"
+        (self.root / "docs/release-notes.md").write_text(current_notes + "\n\n" + old_notes, encoding="utf-8")
         (self.root / "runtime-manifest.json").write_text(json.dumps({"version": "1.0.0"}), encoding="utf-8")
         tv = {"version": "1.0.9", "url": "https://github.com/fixture/tv.apk", "sha256": "a" * 64, "size": 900}
         previous = {"version": "1.9.10", "platforms": {"android-tv": tv, "windows-x86_64": {"version": "1.9.10"}}}
@@ -199,12 +201,36 @@ class PublishTests(unittest.TestCase):
         feed = json.loads((release_dir / "latest.json").read_text(encoding="utf-8"))
         self.assertEqual(set(feed["platforms"]),{"windows-x86_64"})
         self.assertEqual(feed["version"], "1.1.0")
+        self.assertEqual(feed["notes"].strip(), current_notes)
+        self.assertEqual(make.call_args.args[2].strip(), current_notes)
+        self.assertNotIn("红果桌面 1.0.0", feed["notes"])
+        self.assertNotIn("hongguo-1.0.0-setup.exe", make.call_args.args[2])
         self.assertIn("/v1.1.0/hongguo-1.1.0-setup.exe", feed["platforms"]["windows-x86_64"]["url"])
         self.assertEqual(previous, old)
         self.assertEqual(make.call_args.args[0],P.REPO)
         self.assertEqual([asset.name for asset in make.call_args.args[1]], [
             "hongguo-1.1.0-setup.exe", "latest.json", "SHA256SUMS.txt"
         ])
+
+    def test_current_release_notes_selects_requested_version_between_other_versions(self):
+        notes = self.root / "release-notes.md"
+        current = "红果桌面 1.1.0 · 2026-11-18 · 评论修复\n\n- 当前版本评论正文。"
+        notes.write_text("红果桌面 1.2.0 · 2026-11-19 · 后续版本\n\n- 后续版本内容。\n\n" + current
+                         + "\n\n红果桌面 1.0.0 · 2026-11-16 · 旧版本\n\n- 旧版本内容。", encoding="utf-8")
+        self.assertEqual(P.current_release_notes(notes, "1.1.0").strip(), current)
+
+    def test_current_release_notes_rejects_missing_version(self):
+        notes = self.root / "release-notes.md"
+        notes.write_text("红果桌面 1.0.0 · 2026-11-16 · 旧版本\n\n- 旧版本内容。", encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            P.current_release_notes(notes, "1.1.0")
+
+    def test_current_release_notes_rejects_duplicate_version_sections(self):
+        notes = self.root / "release-notes.md"
+        section = "红果桌面 1.1.0 · 2026-11-18 · 评论修复\n\n- 当前版本内容。"
+        notes.write_text(section + "\n\n" + section, encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            P.current_release_notes(notes, "1.1.0")
 
     def test_retired_repository_publication_is_blocked(self):
         with patch.object(P,"request") as remote,self.assertRaisesRegex(RuntimeError,"停止维护"):

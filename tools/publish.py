@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import shutil
 import subprocess
@@ -22,6 +23,18 @@ LEGACY = OWNER + "/hongguo-desktop-releases"
 VERSION = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
 # 仅供旧 1.9.x 更新器比较与固定文件名使用，不是新客户端版本。
 LEGACY_BRIDGE_VERSION = "1.9.15"
+
+
+def current_release_notes(path, version):
+    """Select exactly one version from the chronological release-notes document."""
+    text = Path(path).read_text(encoding="utf-8")
+    sections = list(re.finditer(r"(?m)^红果桌面 (?P<version>[0-9]+\.[0-9]+\.[0-9]+) (?=·)", text))
+    selected = [index for index, section in enumerate(sections) if section.group("version") == version]
+    if len(selected) != 1:
+        raise RuntimeError("当前版本更新说明缺失或重复：" + version)
+    index = selected[0]
+    end = sections[index + 1].start() if index + 1 < len(sections) else len(text)
+    return text[sections[index].start():end].strip() + "\n"
 
 
 def token():
@@ -292,7 +305,7 @@ def publish(secret, legacy=False):
     if publish_runtime and not archive.is_file():
         raise RuntimeError("可重建运行时尚未归档")
     digest = hashlib.sha256(installer.read_bytes()).hexdigest()
-    notes = (ROOT / "docs/release-notes.md").read_text(encoding="utf-8")
+    notes = current_release_notes(ROOT / "docs/release-notes.md", VERSION)
     platforms = {}
     platforms["windows-x86_64"] = {"version": VERSION, "sha256": digest, "size": installer.stat().st_size,
         "url": "https://github.com/%s/releases/download/v%s/%s" % (REPO, VERSION, installer.name)}
