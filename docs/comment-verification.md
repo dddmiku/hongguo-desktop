@@ -22,7 +22,7 @@
 
 作品《全民副本：我能打造九九八十一难第二季》第 49 集：首屏显示 20 条真实评论，下一页新增 20 条，界面共显示 40 条，正文与同一接口结果逐项匹配。接口总数在源码验证时为 234，正式客户端验证时为 235；在线新增评论会改变总数。图片评论的纯文本字段为空，现有界面仍按文本模型展示。
 
-验收截图及只包含计数、布尔和摘要的结果位于 `_work/comment-fix/`；界面 fixture 结果位于 `_work/comments-qa/result.json`。验收后返回本机最近观看的集数。公开 Release 仍为此前版本，本轮未推送发布。
+验收截图及只包含计数、布尔和摘要的结果位于 `_work/comment-fix/`；界面 fixture 结果位于 `_work/comments-qa/result.json`。验收后返回本机最近观看的集数。公开发布使用 `tools/publish.py`，下载、更新清单与源码标签使用 `tools/verify-current-release.py` 核验。
 
 安装包：`release/hongguo-1.4.6-setup.exe`。
 
