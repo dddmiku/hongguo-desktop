@@ -142,7 +142,7 @@ def create_app(provider, token, media_manager=None, signer_ok=lambda: True):
 
     @app.get("/catalog/comments")
     def comments(seriesId: str = Query(..., min_length=8, max_length=24), episode: int = Query(..., ge=1, le=100000),
-                 cursor: int = Query(0, ge=0, le=1000000)):
+                 cursor: str = Query("0", min_length=1, max_length=4096)):
         return provider.comments(seriesId, episode, cursor)
 
     @app.get("/account/session")

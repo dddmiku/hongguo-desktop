@@ -658,29 +658,38 @@ class Provider:
 
     def comments(self, series_id, episode, cursor=0):
         sid = identifier(series_id)
-        if not 1 <= number(episode) <= 100000 or not 0 <= number(cursor) <= 1000000:
+        if (not 1 <= number(episode) <= 100000 or isinstance(cursor, bool)
+                or not isinstance(cursor, (str, int)) or not 1 <= len(str(cursor)) <= 4096
+                or any(ord(char) < 32 for char in str(cursor))
+                or (str(cursor).lstrip("-").isdigit() and not 0 <= int(cursor) <= 1000000)):
             raise ProviderError("INPUT_INVALID", "评论页码不正确", 400)
         target = next((row for row in self.detail(sid)["episodes"] if row["index"] == int(episode)), None)
         if not target:
             raise ProviderError("EPISODE_NOT_FOUND", "这集不存在", 404)
+        credentials = dict(self.account.load_session() or {})
+        identity = self.account._session_identity(credentials)
         def read():
             body = {"comment_source": 4, "server_channel": 18, "group_type": 30, "comment_type": 4,
                 "sort": 1, "count": 20, "cursor": str(cursor), "business_param": {
                     "book_id": sid, "item_id": target["vid"], "need_count": True, "req_type": 0}}
-            url = self.sdk.build_url(f"/novel/commentapi/comment/list/{target['vid']}/v1/")
-            headers = dict(self.sdk.CFG["session_headers"])
-            payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
-            headers.update({"content-type": "application/json; charset=utf-8",
-                            "x-ss-stub": hashlib.md5(payload).hexdigest().upper()})
-            headers.update(self.sdk.sign(url, headers))
-            self.sdk.SG.throttle.wait()
-            response = self.sdk.http_request("POST", url, data=payload, headers=headers, timeout=20)
-            response.raise_for_status()
-            data = response.json()
-            if data.get("code") not in (0, "0"):
+            # The shared transport signs the exact body bytes and carries this session.
+            data = self.account._json(self.account._call("POST",
+                f"/novel/commentapi/comment/list/{target['vid']}/v1/", body=body, session=credentials))
+            if self.account._account_changed(credentials):
+                raise ProviderError("ACCOUNT_CHANGED", "账号已切换，请重试读取评论", 409)
+            if not isinstance(data, dict) or data.get("code") not in (0, "0") or not isinstance(data.get("data"), dict):
                 raise ProviderError("COMMENTS_UNAVAILABLE", "评论暂时无法加载，请稍后重试")
-            data = data.get("data") or {}
-            info = data.get("common_list_info") or {}
+            data = data["data"]
+            info = data.get("common_list_info")
+            if not isinstance(info, dict) or not isinstance(data.get("data_list"), list):
+                raise ProviderError("COMMENTS_UNAVAILABLE", "评论暂时无法加载，请稍后重试")
+            next_cursor = info.get("cursor", 0)
+            has_more = bool(info.get("has_more"))
+            if (isinstance(next_cursor, bool) or not isinstance(next_cursor, (str, int))
+                    or not 1 <= len(str(next_cursor)) <= 4096
+                    or any(ord(char) < 32 for char in str(next_cursor))
+                    or (has_more and str(next_cursor) in ("0", str(cursor)))):
+                raise ProviderError("COMMENTS_UNAVAILABLE", "评论暂时无法加载，请稍后重试")
             items = []
             for item in data.get("data_list") or []:
                 comment = item.get("comment") or {}
@@ -692,9 +701,9 @@ class Provider:
                     "nickname": str(user.get("user_name") or "匿名"), "avatar": str(user.get("user_avatar") or ""),
                     "likes": number((comment.get("stat") or {}).get("digg_count")),
                     "time": datetime.fromtimestamp(stamp, timezone.utc).isoformat() if stamp else ""})
-            return {"items": items, "total": number(info.get("total")), "cursor": number(info.get("cursor")),
-                    "hasMore": bool(info.get("has_more"))}
-        return self.cache.get(("comments", sid, int(episode), int(cursor)), 30, lambda: self._read("读取评论", read))
+            return {"items": items, "total": number(info.get("total")), "cursor": next_cursor,
+                    "hasMore": has_more}
+        return self.cache.get(("comments", identity, sid, int(episode), str(cursor)), 30, lambda: self._read("读取评论", read))
 
     def danmaku(self, series_id, episode, position=0, duration=0, refresh=False):
         sid = identifier(series_id)

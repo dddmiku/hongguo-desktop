@@ -12,7 +12,7 @@ export interface HistoryPage { items: HistoryItem[]; total: number; nextCursor: 
 export interface Session { loggedIn: boolean; uid: string; nickname: string; avatar: string; mobile: string; }
 export interface QrLoginState {id:string;status:'waiting'|'scanned'|'verifying'|'confirmed'|'expired'|'cancelled'|'failed';expiresAt:number;pollAfter:number;message:string;imageDataUrl?:string;session?:Session;error?:{code:string;message:string};}
 export interface Comment { id: string; text: string; nickname: string; avatar: string; likes: number; time: string; }
-export interface CommentsPage { items: Comment[]; total: number; cursor: number; hasMore: boolean; }
+export interface CommentsPage { items: Comment[]; total: number; cursor: string | number; hasMore: boolean; }
 export interface DanmakuItem { id: string; text: string; time: number; }
 export interface DanmakuPage { items: DanmakuItem[]; start: number; end: number; hasMore: boolean; seriesId: string; vid: string; source: 'mobile'; }
 export interface MediaSession { id: string; url: string; phase: 'preparing' | 'ready' | 'complete' | 'error' | 'cancelled'; error?: string; cached?: boolean; quality?: string; duration?: number; delivery?: 'remux' | 'transcode'; videoCodec?: string; }
