@@ -56,14 +56,15 @@ const observeSeeks = async () => page.evaluate(() => {
   for (const event of ['seeking', 'seeked']) stage.addEventListener(event, window.__seekListener, true);
   return document.querySelector('video[data-active=true]').currentTime;
 });
-const seekArrow = async (key, direction, paused = false) => {
+const seekArrow = async (key, direction, paused = false, seconds = 5) => {
   const before = await observeSeeks();
   await page.keyboard.press(key);
-  await page.waitForFunction(({ before, direction, paused }) => {
+  await page.waitForFunction(({ before, direction, paused, seconds }) => {
     const video = document.querySelector('video[data-active=true]');
-    return !video.seeking && video.paused === paused && direction * (video.currentTime - before) > 4
-      && window.__seekEvents.some(event => event.type === 'seeked' && Math.abs(event.time - (before + direction * 5)) < 1);
-  }, { before, direction, paused }, { timeout: 10000 });
+    const tolerance = seconds === 1 ? .35 : 1;
+    return !video.seeking && video.paused === paused
+      && window.__seekEvents.some(event => event.type === 'seeked' && Math.abs(event.time - (before + direction * seconds)) < tolerance);
+  }, { before, direction, paused, seconds }, { timeout: 10000 });
   // A seek can emit playing after seeked; keep watching until the decoder settles.
   await page.waitForTimeout(400);
   return !(await page.evaluate(() => window.__controlsFlashed));
@@ -75,6 +76,8 @@ const quietArrows = async mode => {
   await observeControls();
   check(`${mode}右方向键快进五秒不弹控制栏`, await seekArrow('ArrowRight', 1));
   check(`${mode}左方向键快退五秒不弹控制栏`, await seekArrow('ArrowLeft', -1));
+  check(`${mode}Shift+右方向键快进一秒不弹控制栏`, await seekArrow('Shift+ArrowRight', 1, false, 1));
+  check(`${mode}Shift+左方向键快退一秒不弹控制栏`, await seekArrow('Shift+ArrowLeft', -1, false, 1));
   const before = await observeSeeks();
   await page.keyboard.down('ArrowRight');
   await page.keyboard.down('ArrowRight');
@@ -85,6 +88,23 @@ const quietArrows = async mode => {
   check(`${mode}长按方向键连续快进不弹控制栏`, !(await page.evaluate(() => window.__controlsFlashed)));
   await page.screenshot({ path: path.join(out, `${resultName}-${mode === '普通模式' ? 'normal' : 'fullscreen'}-keyboard-seek.png`) });
   await page.evaluate(() => window.__controlObserver.disconnect());
+};
+const shortcuts = () => page.getByRole('dialog', { name: '播放快捷键', exact: true });
+const helpButton = () => page.getByRole('button', { name: '播放快捷键', exact: true });
+const inspectShortcutDialog = async (mode, fullscreen, theater) => {
+  const decoded = await geometry();
+  await page.keyboard.press('?');
+  await shortcuts().waitFor();
+  const entries = await shortcuts().getByRole('listitem').allTextContents();
+  check(mode + '问号打开完整快捷键面板', entries.length === 13 && entries.some(entry => entry.includes('快退 / 快进 1 秒')));
+  await page.keyboard.press('j');
+  await page.locator('video[data-active=true]').evaluate(node => node.focus());
+  const after = await geometry();
+  check(mode + '帮助面板锁住焦点并隔离播放快捷键', await shortcuts().evaluate(node => node.contains(document.activeElement)) && !after.paused && after.sameVideo === decoded.sameVideo);
+  await page.keyboard.press('Escape');
+  await shortcuts().waitFor({ state: 'hidden' });
+  check(mode + 'Esc 只关闭快捷键面板', await page.locator('.player-page').count() === 1 && (await geometry()).fullscreen === fullscreen && (await page.locator('.player-theater').count() > 0) === theater);
+  return entries;
 };
 try {
   instance = await electron.launch({ ...(installed || packaged ? { executablePath: installed ? path.join(process.env.LOCALAPPDATA, 'Programs/hongguo-desktop/红果桌面.exe') : path.join(root, 'release/win-unpacked/红果桌面.exe'), args: [] } : { args: ['.'], cwd: root }), env: { ...process.env, HG_TEST_DATA_DIR: path.join(out, installed ? 'installed-profile' : packaged ? 'packaged-profile' : 'profile'), HG_TEST_BACKGROUND: '1', TEMP: out, TMP: out }, timeout: 60000 });
@@ -132,6 +152,8 @@ try {
   await observeControls();
   check('右键快进五秒时底部控制栏未弹出', await seekArrow('ArrowRight', 1));
   check('左键快退五秒时底部控制栏未弹出', await seekArrow('ArrowLeft', -1));
+  check('窗口全屏 Shift+右方向键快进一秒不弹控制栏', await seekArrow('Shift+ArrowRight', 1, false, 1));
+  check('窗口全屏 Shift+左方向键快退一秒不弹控制栏', await seekArrow('Shift+ArrowLeft', -1, false, 1));
   await page.evaluate(() => {
     const video = document.querySelector('video[data-active=true]');
     Object.defineProperty(video, 'seekable', { configurable: true, get: () => ({ length: 0 }) });
@@ -151,10 +173,33 @@ try {
   check('退出按钮不在拖动区内', await nativeHit(exitBounds.x + exitBounds.width / 2, exitBounds.y + exitBounds.height / 2) === 1);
   await page.keyboard.press('Control+k');
   check('隐藏的搜索框不会抢走窗口全屏快捷键', await search.evaluate(node => document.activeElement !== node));
+  await inspectShortcutDialog('窗口全屏', false, true);
   await page.keyboard.press('Escape');
   await page.waitForFunction(() => !document.querySelector('.player-theater'));
   check('Esc只退出窗口全屏并恢复导航和原视频', await page.locator('.app-header').isVisible() && (await geometry()).sameVideo && !await page.locator('video[data-active=true]').evaluate(node => node.paused));
   await quietArrows('普通模式');
+  const shortcutEntries = await inspectShortcutDialog('普通模式', false, false);
+  await search.focus();
+  await search.press('?');
+  check('搜索输入问号不打开播放快捷键表', (await search.inputValue()).includes('?') && !await shortcuts().count());
+  await search.fill('');
+  await search.evaluate(node => node.blur());
+  await hover();
+  await helpButton().click();
+  await shortcuts().waitFor();
+  await shortcuts().getByRole('button', { name: '关闭播放快捷键' }).click();
+  check('点击按钮打开快捷键表，关闭后归还焦点', await helpButton().evaluate(node => node === document.activeElement));
+  await page.keyboard.press('Shift+Tab');
+  await page.waitForSelector('.video-stage.controls-hidden');
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('.player-controls')).opacity === '1');
+  check('键盘焦点留在控制栏时提示仍可见', await page.locator('.player-controls').evaluate(node => node.contains(document.activeElement) && document.activeElement.matches(':focus-visible') && getComputedStyle(document.activeElement).outlineStyle !== 'none'));
+  const muted = await page.locator('video[data-active=true]').evaluate(node => node.muted);
+  const mute = page.getByTitle('静音（M）', { exact: true });
+  await mute.focus();
+  await page.keyboard.press('Space');
+  await page.waitForFunction(prior => document.querySelector('video[data-active=true]').muted !== prior, muted);
+  check('空格操作焦点静音按钮，保持播放和键盘焦点', !(await geometry()).paused && await mute.evaluate(node => document.activeElement === node));
+  await mute.evaluate(node => node.blur());
   await page.locator('.content-scroll').evaluate(node => { node.scrollTop = 65; });
   const scroll = await page.locator('.content-scroll').evaluate(node => node.scrollTop);
   check('普通模式存在实际滚动位置', scroll > 0, { scroll });
@@ -173,6 +218,7 @@ try {
   check('窗口全屏可以继续进入系统全屏', await page.locator('.playback-layout').evaluate(node => document.fullscreenElement === node));
   check('系统全屏不保留窗口拖动区', !await page.locator('.window-drag-region').isVisible() && await nativeHit(200, 16) === 1);
   await quietArrows('系统全屏');
+  await inspectShortcutDialog('系统全屏', true, true);
   await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.fullscreenElement);
   check('系统全屏退出后仍保留窗口全屏', await page.locator('.player-theater').count() === 1 && fillsWindow(await geometry()));
   await hover(); await page.getByTitle('弹幕设置', { exact: true }).click();
@@ -187,6 +233,8 @@ try {
   await page.waitForFunction(before => { const video = document.querySelector('video[data-active=true]'); return !video.seeking && Math.abs(video.currentTime - before - 5) < .1 && window.__seekEvents.some(event => event.type === 'seeked'); }, pausedPosition);
   check('手动暂停后方向键定位仍保持暂停并保留可用控制栏', (await geometry()).paused && !(await page.locator('.video-stage').evaluate(stage => stage.classList.contains('controls-hidden'))));
   const timeline = page.getByLabel('播放进度', { exact: true });
+  const spokenProgress = await timeline.getAttribute('aria-valuetext');
+  check('读屏可获取进度的分秒和总时长', /^[0-9]+ 分 [0-9]+ 秒，共 2 分 0 秒$/.test(spokenProgress), { spokenProgress });
   await timeline.focus();
   const sliderBefore = await timeline.inputValue();
   await page.keyboard.press('ArrowRight');
@@ -207,6 +255,9 @@ try {
   await page.waitForFunction(() => !document.querySelector('.player-theater'));
   await page.getByRole('button', { name: '返回', exact: true }).click();
   check('结束播放后恢复首页与顶部栏', !await page.locator('.player-page').count() && await page.locator('.app-header').isVisible());
+  await page.locator('.header-settings').click();
+  const settingsEntries = await page.locator('.player-shortcut-list').getByRole('listitem').allTextContents();
+  check('设置和播放器快捷键表一致', JSON.stringify(settingsEntries) === JSON.stringify(shortcutEntries));
   check('无渲染异常且窗口静音', errors.length === 0 && await instance.evaluate(({ webContents }) => webContents.getAllWebContents().every(contents => contents.isAudioMuted())), { errors });
 } catch (error) {
   checks.push({ name: '窗口全屏回归', ok: false, error: error.name, message: error.message.slice(0, 200) });

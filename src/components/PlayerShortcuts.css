@@ -1,0 +1,59 @@
+.player-shortcut-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 22px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.player-shortcut-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+.player-shortcut-keys {
+  display: inline-flex;
+  gap: 5px;
+  white-space: nowrap;
+}
+.player-shortcut-keys kbd {
+  padding: 2px 6px;
+  min-width: 24px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  text-align: center;
+}
+.player-shortcut-dialog {
+  width: min(620px, calc(100% - 36px));
+  max-height: calc(100% - 36px);
+  overflow: auto;
+  padding: 18px 22px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 20px 80px #0006;
+  cursor: auto;
+  -webkit-app-region: no-drag;
+}
+.player-shortcut-dialog::backdrop { background: #0009; }
+.player-shortcut-dialog header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.player-shortcut-dialog h2 { margin: 0; font-size: 19px; }
+@media (max-width: 580px) {
+  .player-shortcut-list { grid-template-columns: minmax(0, 1fr); }
+}

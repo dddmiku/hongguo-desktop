@@ -1,21 +1,36 @@
-import { chromium } from '@playwright/test';
+import { chromium, expect } from '@playwright/test';
 import { createServer } from 'vite';
 import { mkdir,writeFile } from 'node:fs/promises';
 import path from 'node:path';
 const root=process.cwd(),out=path.join(root,'_work','history-qa');await mkdir(out,{recursive:true});
-const server=await createServer({configFile:path.join(root,'vite.config.ts'),server:{host:'127.0.0.1',port:0}});await server.listen();
+const observePlayback = {
+  name: 'observe-history-playback-target', enforce: 'pre',
+  transform(_source, id) {
+    if (!id.replaceAll('\\', '/').endsWith('/src/components/Player.tsx')) return null;
+    return 'import React from "react"; export default function Player({initialEpisode,initialPosition,onClose}) { return React.createElement("button",{type:"button",className:"history-qa-player","data-episode":initialEpisode,"data-position":initialPosition,onClick:onClose},"结束验收播放"); }';
+  },
+};
+const server=await createServer({configFile:path.join(root,'vite.config.ts'),plugins:[observePlayback],server:{host:'127.0.0.1',port:0}});await server.listen();
 const browser=await chromium.launch({channel:'msedge',headless:true}),context=await browser.newContext({viewport:{width:1440,height:960}});
 await context.addInitScript(()=>{
   const now=Date.now()/1000;
   const history=Array.from({length:120},(_,n)=>({series:{id:String(12345678+n),title:'历史剧 '+String(n+1).padStart(3,'0'),cover:'',intro:'剧情',totalEpisodes:10,tags:[],actors:[]},episode:n===119?7:2,position:n===119?35:10,duration:60,watchedAt:now-n*1800,uid:'fixture'}));
+  Object.assign(history[0], { episode: 10, position: 60 });
+  history[1].position = 60;
+  history[2].position = 10.5;
+  history[1].series.actors = ['演员 Ada'];
+  history[2].series.actors = ['演员 李小红'];
   const prefs={theme:'dark',quality:'1080p',rate:1,autoplay:true,volume:.8,cacheGB:4,closeToTray:true,bossKey:'CommandOrControl+Shift+B'};
   const hidden=new Set();
-  const library=()=>({history:history.filter(i=>!hidden.has(i.series.id)).slice(0,50),historyTotal:120-hidden.size,favorites:[]});
+  const library=()=>({history:history.filter(i=>!hidden.has(i.series.id)).slice(0,50),historyTotal:120-hidden.size,favorites:[history[1].series,history[2].series]});
   window.__historyQueries=[];
+  window.__mediaRequests=[];
   window.hongguo={
-    request:async route=>{
+    request:async (route, options)=>{
       if(route==='/account/session')return{loggedIn:true,uid:'fixture',nickname:'测试账号',avatar:'',mobile:''};
-      if(route.startsWith('/catalog/series/')){const item=history.find(i=>route.endsWith(i.series.id));return{series:item.series,episodes:Array.from({length:10},(_,n)=>({index:n+1,vid:String(23456789+n),title:'第 '+(n+1)+' 集'}))};}
+      if(route.startsWith('/catalog/series/') && route.includes('/seasons'))return{status:'single',currentSeason:1,seasons:[]};
+      if(route.startsWith('/catalog/series/')){const item=history.find(i=>route.endsWith(i.series.id));return{series:item.series,episodes:Array.from({length:10},(_,n)=>({index:n+1,vid:String(23456789+n),title:'第 '+(n+1)+' 集'})).filter(ep=>item!==history[1]||ep.index!==3)};}
+      if(route==='/media/session'){window.__mediaRequests.push(options.body);return{id:'fixture-'+window.__mediaRequests.length,url:'#',phase:'ready'};}
       if(route.startsWith('/catalog'))return{items:history.slice(0,30).map(i=>i.series),hasMore:false};return{};
     },
     getSettings:async()=>prefs,saveSettings:async()=>prefs,getLibrary:async()=>library(),
@@ -29,9 +44,50 @@ const page=await context.newPage(),errors=[],checks=[];page.on('pageerror',error
 function passed(name,detail){checks.push({name,ok:true,detail});console.log(JSON.stringify(checks.at(-1)));}
 try{
   await page.goto('http://127.0.0.1:'+server.httpServer.address().port);await page.waitForSelector('.series-card');
+  const playback = page.locator('.history-qa-player');
+  const verifyPlayback = async (episode, position) => {
+    await expect(playback).toHaveAttribute('data-episode', String(episode));
+    await expect(playback).toHaveAttribute('data-position', String(position));
+    await expect.poll(()=>page.evaluate(()=>window.__mediaRequests.at(-1))).toMatchObject({episode,start:position});
+    await playback.click();
+  };
+  const continuation = page.getByRole('region',{name:'接着看'});
+  const wanted = ['历史剧 002','历史剧 003','历史剧 004'].map(title=>'继续观看 '+title);
+  const labels = locator=>locator.getByRole('button',{name:/继续观看/}).evaluateAll(nodes=>nodes.map(node=>node.getAttribute('aria-label')));
+  await expect.poll(()=>labels(continuation)).toEqual(wanted);
+  await continuation.getByRole('button',{name:wanted[0]}).click();await verifyPlayback(4,0);
+  await page.getByRole('button',{name:'为你推荐',exact:true}).click();
+  await expect.poll(()=>labels(page.locator('.continue-strip'))).toEqual(wanted);
+  await page.getByRole('button',{name:'我的片库',exact:true}).click();
+  const drawer=page.getByRole('dialog',{name:'我的片库'});
+  await expect.poll(()=>labels(drawer)).toEqual(wanted);
+  await drawer.getByRole('button',{name:wanted[1]}).click();await verifyPlayback(2,10.5);
+  passed('三处接着看均排除已看完全剧，按实际集数续播和预加载');
+
+  await page.getByRole('button',{name:'我的收藏',exact:true}).click();
+  const favorites=page.locator('.favorites-page'),favoriteInput=page.getByRole('searchbox',{name:'搜索我的收藏'});
+  await expect(favorites.locator('.series-card')).toHaveCount(2);
+  await context.setOffline(true);
+  await favoriteInput.fill('  ＡＤａ  ');
+  await expect(favorites.locator('.series-card')).toHaveCount(1);
+  await expect(favorites.locator('.series-title')).toHaveText('历史剧 002');
+  await favoriteInput.fill('003');
+  await expect(favorites.locator('.series-title')).toHaveText('历史剧 003');
+  await favoriteInput.fill('无结果');
+  await expect(favorites.getByText('没有匹配的收藏')).toBeVisible();
+  await favorites.getByRole('button',{name:'查看全部收藏'}).click();
+  await expect(favoriteInput).toBeFocused();
+  await expect(favorites.locator('.series-card')).toHaveCount(2);
+  await context.setOffline(false);
+  passed('收藏离线搜索支持剧名、演员和清除空态');
+
   await page.getByRole('button',{name:'观看历史',exact:true}).click();await page.waitForSelector('.history-card');
   if(await page.locator('.history-card').count()!==50)throw new Error('历史首屏不是50条');
   if(!(await page.locator('.history-overview').innerText()).includes('120'))throw new Error('总数没有显示全量');
+  await expect(page.getByRole('button',{name:'历史剧 001',exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'历史剧 002',exact:true}).click();
+  await page.locator('.detail-actions').getByRole('button',{name:'播放第 4 集',exact:true}).click();await verifyPlayback(4,0);
+  passed('历史保留已看完剧，详情按钮按可播列表跳过缺集');
   await page.getByRole('button',{name:'更早的观看记录'}).click();await page.waitForFunction(()=>document.querySelectorAll('.history-card').length===100);
   await page.getByRole('button',{name:'更早的观看记录'}).click();await page.waitForFunction(()=>document.querySelectorAll('.history-card').length===120);passed('超过100条的分页历史完整呈现',{items:120});
   await page.getByRole('button',{name:'历史剧 120',exact:true}).click();await page.waitForSelector('.detail-hero');

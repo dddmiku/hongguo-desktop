@@ -1,7 +1,7 @@
 import { ArrowRight, CheckCheck, ChevronDown, Clock3, LoaderCircle, Play, RefreshCw, Search, ShieldCheck, Trash2, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { HistoryItem, HistoryPage, HistoryQuery, Series } from '../../shared/contracts';
-import { episodeFinished, groupHistory, isHistoryFinished, nextHistory, normalizeHistoryQuery, positionLabel, resumeHistory } from '../history-query';
+import { episodeFinished, groupHistory, isHistoryFinished, nextHistory, normalizeHistoryQuery, positionLabel } from '../history-query';
 import { Empty, Failure, Loading, Poster, message } from './ui';
 import './History.css';
 
@@ -66,9 +66,9 @@ export default function History({ onOpen, onRemove, onSync, syncing, revision, n
       <div className="history-groups">{groupHistory(items.slice(windowStart,windowStart+300)).map(group=><section className="history-day" key={group.key}><h2><Clock3 size={15}/>{group.label}<span>{group.items.length} 部</span></h2><div className="history-list">{group.items.map(item=>{
         const finished=isHistoryFinished(item),complete=episodeFinished(item);
         return <article className="history-card" key={item.series.id}>
-          <button className="history-poster" onClick={()=>onOpen(item.series,true,resumeHistory(item))} aria-label={'继续观看 '+item.series.title}><Poster cover={item.series.cover} title={item.series.title}/><span><Play size={20} fill="currentColor"/></span></button>
+          <button className="history-poster" onClick={()=>onOpen(item.series,true,item)} aria-label={(finished?'重新观看 ':complete?'查看并播放下一集 ':'继续观看 ')+item.series.title}><Poster cover={item.series.cover} title={item.series.title}/><span><Play size={20} fill="currentColor"/></span></button>
           <div className="history-info"><button className="history-title" onClick={()=>onOpen(item.series,false,item)}>{item.series.title}</button><p>{finished?<span className="history-complete"><CheckCheck size={13}/>已看完全集</span>:<>第 {item.episode} 集{item.series.totalEpisodes>0?' / 共 '+item.series.totalEpisodes+' 集':''}<span className="history-position"> · {complete?'本集已看完':item.position>0?'看到 '+positionLabel(item.position):'播放位置待继续'}</span></>}</p>{item.duration>0&&<div className="history-progress" aria-label={'本集观看进度 '+Math.min(100,Math.round(item.position/item.duration*100))+'%'}><span style={{width:Math.min(100,item.position/item.duration*100)+'%'}}/></div>}</div>
-          <div className="history-actions"><button className="btn secondary" onClick={()=>onOpen(item.series,true,resumeHistory(item))}><Play size={15} fill="currentColor"/>{complete&&!finished?'观看下一集':'继续观看'}</button><button className="icon-button muted" title="只移除本机记录，手机记录不受影响" aria-label={'移除 '+item.series.title+' 的本地记录'} disabled={!!removing} onClick={()=>void remove(item.series.id)}>{removing===item.series.id?<LoaderCircle size={17} className="spin"/>:<Trash2 size={17}/>}</button></div>
+          <div className="history-actions"><button className="btn secondary" onClick={()=>onOpen(item.series,true,item)}><Play size={15} fill="currentColor"/>{finished?'重新观看':complete?'观看下一集':'继续观看'}</button><button className="icon-button muted" title="只移除本机记录，手机记录不受影响" aria-label={'移除 '+item.series.title+' 的本地记录'} disabled={!!removing} onClick={()=>void remove(item.series.id)}>{removing===item.series.id?<LoaderCircle size={17} className="spin"/>:<Trash2 size={17}/>}</button></div>
         </article>;
       })}</div></section>)}</div>
       {error&&<div className="history-load-error" role="alert"><p>已保留当前记录。{error}</p><button className="btn subtle" onClick={()=>{if(failedMore)void more();else setRetry(value=>value+1);}}>重试</button></div>}

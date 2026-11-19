@@ -1,0 +1,3 @@
+.favorites-toolbar { display: flex; margin-bottom: 14px; }
+.favorites-toolbar .favorites-search { flex: 0 1 340px; min-width: 0; }
+.favorites-search input::-webkit-search-cancel-button { display: none; }

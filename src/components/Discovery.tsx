@@ -4,11 +4,12 @@ import type { Genre, HistoryItem, Series } from '../../shared/contracts';
 import { readCatalog, writeCatalog } from '../catalog-cache';
 import type { CatalogResult } from '../catalog-cache';
 import { discoverySections } from '../discovery-sections';
+import { continueWatchingLabel } from '../history-query';
 import { message, Poster } from './ui';
 import './Discovery.css';
 
 export type DiscoveryDestination = 'browse' | 'rank' | 'recommend';
-interface Props { items: Series[]; genre: Genre; history: HistoryItem[]; favorites: Set<string>; reload: number; onOpen: (series: Series, play?: boolean) => void; onFavorite: (series: Series) => void; onNavigate?: (page: DiscoveryDestination, genre?: Genre) => void; }
+interface Props { items: Series[]; genre: Genre; history: HistoryItem[]; favorites: Set<string>; reload: number; onOpen: (series: Series, play?: boolean, progress?: HistoryItem) => void; onFavorite: (series: Series) => void; onNavigate?: (page: DiscoveryDestination, genre?: Genre) => void; }
 interface Board { items: Series[]; loading: boolean; error: string; }
 const keyFor = (board: 'hot' | 'new', genre: Genre) => `/catalog/rank?board=${board}&genre=${genre}`;
 const cachedBoard = (board: 'hot' | 'new', genre: Genre): Board => ({ items: readCatalog(keyFor(board, genre))?.items || [], loading: true, error: '' });
@@ -54,7 +55,7 @@ export default function Discovery({ items, genre, history, favorites, reload, on
   const hero = sections.hero, boardsPending = current.hot.loading || current.new.loading;
   const navigate = (page: DiscoveryDestination) => onNavigate?.(page, genre);
   return <div className="discovery-content">
-    {history.length > 0 && <section className="discovery-continue" aria-label="接着看"><div className="discovery-continue-label"><Play size={15} /><h2>接着看</h2></div><div className="discovery-continue-items">{history.slice(0, 3).map(item => <button className="discovery-resume" key={item.series.id} onClick={() => onOpen(item.series, true)} aria-label={`继续观看 ${item.series.title}`}><Poster cover={item.series.cover} title={item.series.title} /><span><strong>{item.series.title}</strong><small>第 {item.episode} 集{item.position > 0 ? ` · ${Math.floor(item.position / 60)}:${String(Math.floor(item.position % 60)).padStart(2, '0')}` : ''}</small></span><Play size={13} fill="currentColor" /></button>)}</div></section>}
+    {history.length > 0 && <section className="discovery-continue" aria-label="接着看"><div className="discovery-continue-label"><Play size={15} /><h2>接着看</h2></div><div className="discovery-continue-items">{history.map(item => <button className="discovery-resume" key={item.series.id} onClick={() => onOpen(item.series, true, item)} aria-label={`继续观看 ${item.series.title}`}><Poster cover={item.series.cover} title={item.series.title} /><span><strong>{item.series.title}</strong><small>{continueWatchingLabel(item)}</small></span><Play size={13} fill="currentColor" /></button>)}</div></section>}
     {hero && <section className="discovery-hero" aria-label="精选主视觉" data-series-id={hero.id}>
       <div className="discovery-hero-atmosphere"><Poster cover={hero.cover} title={hero.title} priority /><div /></div>
       <div className="discovery-hero-copy"><span className="discovery-eyebrow"><Film size={14} />发现 · 精选故事</span><h2>{hero.title}</h2><p>{hero.intro || '下一段故事，就从这部开始。打开详情，看看每一集。'}</p><div className="discovery-hero-meta">{hero.tags?.slice(0, 3).map(tag => <span key={tag}>{tag}</span>)}{hero.totalEpisodes > 0 && <span>{hero.totalEpisodes} 集</span>}</div><div className="discovery-hero-actions"><button className="btn primary" onClick={() => onOpen(hero, true)}><Play size={17} fill="currentColor" />立即播放</button><button className="discovery-detail" onClick={() => onOpen(hero)}>查看剧集<ArrowRight size={15} /></button><button className={`discovery-hero-favorite ${favorites.has(hero.id) ? 'saved' : ''}`} onClick={() => onFavorite(hero)} aria-label={`${favorites.has(hero.id) ? '取消收藏' : '收藏'} ${hero.title}`}>{favorites.has(hero.id) ? <Check size={18} /> : <Bookmark size={18} />}</button></div></div>
