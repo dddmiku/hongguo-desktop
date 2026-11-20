@@ -33,6 +33,7 @@ from seasons import SeasonResolver
 from search import SearchRows, rank_results, search_series
 from web_search import OfficialWebSearch
 from qr_login import QrLoginManager, QrLoginError
+from series_rankings import read_series_rank
 
 
 GENRES = {"short_play", "comic_series", "ai_series"}
@@ -572,10 +573,13 @@ class Provider:
         return self.cache.get(('suggestions', query), 30, load, cacheable=lambda result: 'warning' not in result)
 
     def rank(self, board="hot", genre="short_play"):
-        self._genre(genre)
-        if board not in {"hot", "new", "recommend"}:
+        if genre != "series":
+            self._genre(genre)
+        if board not in ({"recommend", "new"} if genre == "series" else {"hot", "new", "recommend"}):
             raise ProviderError("INPUT_INVALID", "榜单不正确", 400)
         def read():
+            if genre == "series":
+                return self._list(read_series_rank(self.sdk, board, limit=50))
             rows = self.sdk.rank(board, limit=50) if genre == "comic_series" else self.sdk.browse(
                     genre, sort="online_time" if board == "new" else "hot_score", max_items=50)
             return self._list(rows)

@@ -2,10 +2,15 @@ import type { Genre } from '../shared/contracts';
 import type { CatalogFilterGroup, CatalogFilters } from './catalog-cache';
 
 export type CatalogPage = 'discover' | 'recommend' | 'rank' | 'browse' | 'search';
+export type RankGenre = Genre | 'series';
+export function rankBoards(genre: RankGenre): { id: 'hot' | 'new' | 'recommend'; title: string }[] {
+  return genre === 'series' ? [{ id: 'recommend', title: '推荐榜' }, { id: 'new', title: '新季榜' }] : [{ id: 'hot', title: '热播榜' }, { id: 'new', title: '新剧榜' }];
+}
 export interface CatalogSelection { board: string; sort: string; theme: string; setting: string; background: string; expanded: boolean; }
 export type CategoryKey = 'theme' | 'setting' | 'background';
 export const categoryKeys: Record<string, CategoryKey> = { category_dim_theme: 'theme', category_dim_role: 'setting', category_dim_epoch: 'background' };
 const defaults: CatalogSelection = { board: 'hot', sort: 'hot_score', theme: '', setting: '', background: '', expanded: false };
+const selectionDefaults = (scope: string): CatalogSelection => ({ ...defaults, board: scope === 'rank:series' ? 'recommend' : 'hot' });
 const preferences = new Map<string, CatalogSelection>();
 const STORAGE = 'hongguo:catalog-selection-v1';
 let loaded = false;
@@ -18,16 +23,16 @@ export function readCatalogSelection(scope: string): CatalogSelection {
       const raw = localStorage.getItem(STORAGE);
       for (const [key, value] of raw && raw.length < 15000 ? JSON.parse(raw).slice(0, 16) : []) {
         if (typeof key !== 'string' || key.startsWith('discover:') || !value || typeof value !== 'object') continue;
-        const clean = { ...defaults };
+        const clean = selectionDefaults(key);
         for (const field of ['theme', 'setting', 'background'] as const) if (typeof value[field] === 'string' && /^[A-Za-z0-9_-]{0,80}$/.test(value[field])) clean[field] = value[field];
         if (['hot_score', 'online_time', 'hot_collect'].includes(value.sort)) clean.sort = value.sort;
-        if (['hot', 'new'].includes(value.board)) clean.board = value.board;
+        if (rankBoards(key === 'rank:series' ? 'series' : 'short_play').some(board => board.id === value.board)) clean.board = value.board;
         clean.expanded = value.expanded === true;
         preferences.set(key.slice(0, 80), clean);
       }
     } catch { /* Damaged public preferences never prevent browsing. */ }
   }
-  return { ...(preferences.get(scope) || defaults) };
+  return { ...(preferences.get(scope) || selectionDefaults(scope)) };
 }
 
 export function saveCatalogSelection(scope: string, value: CatalogSelection) {
@@ -49,9 +54,9 @@ export function catalogGroups(filters?: CatalogFilters): CatalogFilterGroup[] {
 
 export function categorySelected(value: CatalogSelection) { return !!(value.theme || value.setting || value.background); }
 
-export function catalogRoute(page: CatalogPage, query: string, genre: Genre, value: CatalogSelection) {
+export function catalogRoute(page: CatalogPage, query: string, genre: Genre, value: CatalogSelection, rankGenre: RankGenre = genre) {
   if (page === 'search') return `/catalog/search?q=${encodeURIComponent(query)}`;
-  if (page === 'rank') return `/catalog/rank?board=${value.board}&genre=${genre}`;
+  if (page === 'rank') return `/catalog/rank?board=${rankGenre === 'series' && value.board !== 'new' ? 'recommend' : value.board}&genre=${rankGenre}`;
   if (page === 'browse') return `/catalog/browse?genre=${genre}&sort=${value.sort}&theme=${encodeURIComponent(value.theme)}&setting=${encodeURIComponent(value.setting)}&background=${encodeURIComponent(value.background)}`;
   return `/catalog/home?genre=${genre}&mode=${page === 'recommend' ? 'recommend' : 'discover'}`;
 }

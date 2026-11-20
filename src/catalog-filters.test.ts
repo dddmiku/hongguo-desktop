@@ -43,4 +43,34 @@ describe('真实分类查询与返回状态', () => {
     const live = catalogGroups({ groups: [{ type: 'category_dim_theme', items: [{ id: 'cate_5001', name: '家庭' }, { id: 'cate_5021', name: '年代' }, { id: 'cate_5000', name: '爱情' }] }] });
     expect(live[0].items.map(item => item.id)).toEqual(['cate_5000', 'cate_5021', 'cate_5001']);
   });
+  it('系列剧使用独立推荐榜和新季榜接口，不影响原作品类型和片库查询', async () => {
+    const { catalogRoute, rankBoards, readCatalogSelection } = await import('./catalog-filters');
+    const series = readCatalogSelection('rank:series');
+    expect(series.board).toBe('recommend');
+    expect(rankBoards('series')).toEqual([{ id: 'recommend', title: '推荐榜' }, { id: 'new', title: '新季榜' }]);
+    expect(catalogRoute('rank', '', 'short_play', series, 'series')).toBe('/catalog/rank?board=recommend&genre=series');
+    expect(catalogRoute('rank', '', 'comic_series', { ...series, board: 'new' }, 'series')).toBe('/catalog/rank?board=new&genre=series');
+    expect(catalogRoute('rank', '', 'comic_series', selected)).toBe('/catalog/rank?board=hot&genre=comic_series');
+    expect(catalogRoute('discover', '', 'short_play', selected, 'series')).toBe('/catalog/home?genre=short_play&mode=discover');
+    expect(catalogRoute('browse', '', 'short_play', selected, 'series')).toBe(catalogRoute('browse', '', 'short_play', selected));
+  });
+  it('系列剧和原榜单分别记住子榜选择，重启后不会串榜', async () => {
+    let helper = await import('./catalog-filters');
+    helper.saveCatalogSelection('rank:series', { ...selected, board: 'new' });
+    helper.saveCatalogSelection('rank:short_play', selected);
+    vi.resetModules(); helper = await import('./catalog-filters');
+    expect(helper.readCatalogSelection('rank:series').board).toBe('new');
+    expect(helper.readCatalogSelection('rank:short_play').board).toBe('hot');
+    expect(helper.readCatalogSelection('rank:comic_series').board).toBe('hot');
+    helper.saveCatalogSelection('rank:series', { ...selected, board: 'recommend' });
+    vi.resetModules(); helper = await import('./catalog-filters');
+    expect(helper.readCatalogSelection('rank:series').board).toBe('recommend');
+  });
+  it('拒绝给原榜单恢复推荐榜，系列剧旧热播选择回落到推荐榜', async () => {
+    storage.set('hongguo:catalog-selection-v1', JSON.stringify([['rank:series', selected], ['rank:short_play', { ...selected, board: 'recommend' }]]));
+    const { readCatalogSelection, catalogRoute } = await import('./catalog-filters');
+    expect(readCatalogSelection('rank:series').board).toBe('recommend');
+    expect(readCatalogSelection('rank:short_play').board).toBe('hot');
+    expect(catalogRoute('rank', '', 'short_play', selected, 'series')).toBe('/catalog/rank?board=recommend&genre=series');
+  });
 });

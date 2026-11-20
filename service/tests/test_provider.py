@@ -197,6 +197,33 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.provider.home("short_play", mode="recommend")["items"][0]["id"], "34567890")
         self.sdk.feed.assert_called_once()
 
+    def test_series_ranking_is_a_rank_only_official_category(self):
+        self.sdk.api = Mock(return_value={"code": 0, "data": {"cell_view": {
+            "cell_data": [{"video_data": [{"series_id": "12345678", "title": "测试系列",
+                "jump_schema": "dragon8662://videoDetail?video_series_id=23456789",
+                "sub_title_list": [{"content": "更新至第3季"}], "episode_cnt": 207}]}], "has_more": False}}})
+        result = self.provider.rank("recommend", "series")
+        self.assertEqual(result["items"][0]["id"], "23456789")
+        self.assertEqual(result["items"][0]["tags"], ["更新至第3季"])
+        self.assertEqual(result["items"][0]["totalEpisodes"], 0)
+        self.sdk.browse.assert_not_called()
+        with self.assertRaises(ProviderError):
+            self.provider.home("series")
+        with self.assertRaises(ProviderError):
+            self.provider.rank("hot", "series")
+
+    def test_series_ranking_route_and_board_caches_stay_separate(self):
+        self.sdk.api = Mock(side_effect=[
+            {"code": 0, "data": {"cell_view": {"cell_data": [{"video_data": [{"series_id": "12345678", "title": "推荐系列"}]}], "has_more": False}}},
+            {"code": 0, "data": {"cell_view": {"cell_data": [{"video_data": [{"series_id": "23456789", "title": "新季系列"}]}], "has_more": False}}}])
+        with TestClient(create_app(self.provider, "a" * 64)) as client:
+            headers = {"Authorization": "Bearer " + "a" * 64}
+            for board, expected in (("recommend", "12345678"), ("new", "23456789"), ("recommend", "12345678")):
+                response = client.get("/catalog/rank", params={"genre": "series", "board": board}, headers=headers)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["items"][0]["id"], expected)
+        self.assertEqual(self.sdk.api.call_count, 2)
+
     def test_browse_filters_are_normalized_for_renderer(self):
         result = self.provider.browse("short_play")
         self.assertEqual(result["filters"]["themes"], ["剧情"])

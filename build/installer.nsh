@@ -38,6 +38,22 @@ Function ${HG_CLOSE_INSTALLATION_FN}
 FunctionEnd
 
 !macro customInit
+  ; Machine-wide upgrades need DELETE rights for the preflight's lock probes.
+  ; Elevate before touching the old process/files, rather than letting the
+  ; builder elevate later in the install section after this hook has failed.
+  ${If} $installMode == "all"
+    ${IfNot} ${UAC_IsAdmin}
+      !insertmacro UAC_RunElevated
+      ${If} $0 != 0
+        SetErrorLevel $0
+      ${ElseIf} $1 == 1
+        SetErrorLevel $2
+      ${Else}
+        SetErrorLevel 740
+      ${EndIf}
+      Quit
+    ${EndIf}
+  ${EndIf}
   ; initMultiUser has populated $INSTDIR. Check the installed HKCU path first,
   ; before uninstallOldVersion begins atomically moving any prior files.
   Push $R7

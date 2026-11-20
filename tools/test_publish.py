@@ -199,6 +199,34 @@ class PublishTests(unittest.TestCase):
             self.run_release(github)
         self.assertEqual([call[0] for call in github.calls], ["GET"])
 
+    def test_raw_upload_is_streamed_with_explicit_length(self):
+        opener = MagicMock()
+        response = opener.open.return_value.__enter__.return_value
+        response.status = 201
+        response.read.return_value = b'{}'
+        with patch.object(P, 'proxy', return_value='http://127.0.0.1:7897'), \
+                patch.object(P.urllib.request, 'build_opener', return_value=opener):
+            status, _ = P.request('POST', 'https://uploads.github.com/repos/fixture/assets',
+                                  'fixture', raw=b'installer payload')
+        request = opener.open.call_args.args[0]
+        self.assertEqual(status, 201)
+        self.assertIsInstance(request.data, P.UploadStream)
+        self.assertEqual(request.get_header('Content-length'), str(len(b'installer payload')))
+        self.assertEqual(request.data.read(3), b'ins')
+        self.assertEqual(request.data.read(), b'taller payload')
+        self.assertNotIn('Authorization', request.headers)
+        self.assertIn('Authorization', request.unredirected_hdrs)
+
+    def test_interrupted_streamed_upload_is_not_replayed(self):
+        opener = MagicMock()
+        opener.open.side_effect = TimeoutError('fixture interrupted upload')
+        with patch.object(P, 'proxy', return_value=None), \
+                patch.object(P.urllib.request, 'build_opener', return_value=opener):
+            with self.assertRaises(TimeoutError):
+                P.request('POST', 'https://uploads.github.com/repos/fixture/assets',
+                          'fixture', raw=b'installer payload')
+        opener.open.assert_called_once()
+
     def test_draft_that_became_public_is_not_modified(self):
         github = GitHub(self.release(assets=[self.remote_asset(False)]))
         github.publish_after_lookup = True

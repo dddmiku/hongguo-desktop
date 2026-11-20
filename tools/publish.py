@@ -5,6 +5,7 @@ import copy
 import ctypes
 from ctypes import wintypes
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -72,11 +73,30 @@ def proxy():
     return None
 
 
+class UploadStream(io.BytesIO):
+    """Avoid a single sendall deadline for a large installer over a slow proxy."""
+    def __init__(self, payload):
+        super().__init__(payload)
+        self.total = len(payload)
+        self.reported = 0
+
+    def read(self, size=-1):
+        chunk = super().read(size)
+        sent = self.tell()
+        if self.total >= 16 * 1024 * 1024 and sent - self.reported >= 32 * 1024 * 1024:
+            self.reported = sent
+            print(json.dumps({"uploadBytesSent": sent, "totalBytes": self.total}), flush=True)
+        return chunk
+
+
 def request(method, url, secret=None, data=None, raw=None, content_type=None):
     headers = {"User-Agent": "hongguo-desktop-publisher", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     body = raw if raw is not None else json.dumps(data).encode() if data is not None else None
     if body is not None:
         headers["Content-Type"] = content_type or "application/json"
+    if raw is not None:
+        headers["Content-Length"] = str(len(raw))
+        body = UploadStream(raw)
     route = proxy()
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": route, "https": route} if route else {}))
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
@@ -157,12 +177,14 @@ def push_source(secret):
 def upload(repo, release, asset, secret):
     raw = asset.read_bytes()
     url = release["upload_url"].split("{")[0] + "?name=" + asset.name
+    started = time.monotonic()
     code, result = request("POST", url, secret, raw=raw, content_type="application/octet-stream")
     if code not in (200, 201) or result.get("size") != len(raw):
         raise RuntimeError("上传资产失败：%s HTTP %s" % (asset.name, code))
     if result.get("digest") and result["digest"] != "sha256:" + hashlib.sha256(raw).hexdigest():
         raise RuntimeError("上传资产摘要不符：" + asset.name)
-    print("已上传：", asset.name, len(raw), "bytes")
+    elapsed = max(.001, time.monotonic() - started)
+    print("已上传：", asset.name, len(raw), "bytes", "%.1fs %.2f MiB/s" % (elapsed, len(raw) / 1048576 / elapsed), flush=True)
     return result
 
 
