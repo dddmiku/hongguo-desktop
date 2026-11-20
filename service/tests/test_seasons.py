@@ -163,7 +163,7 @@ class SeasonTests(unittest.TestCase):
         overview = resolver.overview(ids[0])
         self.assertEqual([row['season'] for row in overview['seasons']], [1, 2])
         self.assertFalse(overview['complete'])
-        self.assertLessEqual(resolver.values[ids[0]][0] - resolver.clock(), resolver.empty_ttl)
+        self.assertLessEqual(resolver.values[ids[0]][0], resolver.clock() + resolver.empty_ttl)
         fallback.side_effect = None
         self.assertEqual(len(resolver.overview(ids[0], refresh=True)['seasons']), 6)
 
