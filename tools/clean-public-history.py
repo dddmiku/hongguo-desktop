@@ -6,6 +6,8 @@ import subprocess
 spec=importlib.util.spec_from_file_location('publisher',Path(__file__).with_name('publish.py'))
 pub=importlib.util.module_from_spec(spec);spec.loader.exec_module(pub)
 root=pub.ROOT
+if pub.VERSION != '1.0.0':
+    raise SystemExit('首发历史清理只适用于尚未发布的 1.0.0 源码')
 def git(*args,env=None):
     return subprocess.run(['git',*args],cwd=root,env=env,check=True,timeout=180,capture_output=True,text=True).stdout.strip()
 if Path(git('rev-parse','--show-toplevel')).resolve()!=root.resolve():

@@ -4,25 +4,33 @@ import argparse
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import threading
 import time
 import requests
+from home_performance import create_run_profile, read_ready
 
 ROOT=Path(__file__).resolve().parents[1]
 parser=argparse.ArgumentParser();parser.add_argument('--label',default='baseline');parser.add_argument('--data',default='home-performance');args=parser.parse_args()
 work=ROOT/'_work'/args.data;work.mkdir(parents=True,exist_ok=True)
 results=[]
 for run in range(2):
+    run_data=create_run_profile(work,run+1)
     token=secrets.token_hex(32);start=time.perf_counter()
-    process=subprocess.Popen([str(ROOT/'runtime/python/python.exe'),'-I','-B',str(ROOT/'service/gateway.py')],
-        stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-        env={**os.environ,'HG_API_TOKEN':token,'HG_DATA_DIR':str(work),'HG_RUNTIME_DIR':str(ROOT/'runtime'),'HG_APP_VERSION':'1.0.0','PYTHONUNBUFFERED':'1'},
-        creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    try:
+        process=subprocess.Popen([str(ROOT/'runtime/python/python.exe'),'-I','-B',str(ROOT/'service/gateway.py')],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+            env={**os.environ,'HG_API_TOKEN':token,'HG_DATA_DIR':str(run_data),'HG_RUNTIME_DIR':str(ROOT/'runtime'),'HG_APP_VERSION':'1.0.0','PYTHONUNBUFFERED':'1'},
+            creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    except Exception:
+        shutil.rmtree(run_data,ignore_errors=True)
+        raise
     errors=[]
     threading.Thread(target=lambda:errors.extend(line.decode('utf-8','replace').strip() for line in process.stderr),daemon=True).start()
     try:
-        ready=json.loads(process.stdout.readline());port=ready['port'];boot=time.perf_counter()-start
+        ready=read_ready(process,on_timeout=lambda:subprocess.run(
+            ['taskkill','/PID',str(process.pid),'/T','/F'],capture_output=True,timeout=10));port=ready['port'];boot=time.perf_counter()-start
         headers={'Authorization':'Bearer '+token};requests_session=requests.Session();requests_session.trust_env=False
         row={'run':run+1,'ready_ms':round(boot*1000,1)}
         for name in ('home_first','home_repeat'):
@@ -38,6 +46,7 @@ for run in range(2):
         except subprocess.TimeoutExpired:
             subprocess.run(['taskkill','/PID',str(process.pid),'/T','/F'],capture_output=True,timeout=10)
             process.wait(timeout=10)
-        if results:
+        if results and results[-1].get('run')==run+1:
             results[-1]['exit_code']=process.returncode
+        shutil.rmtree(run_data,ignore_errors=True)
 (work/(args.label+'.json')).write_text(json.dumps(results,indent=2),encoding='utf-8')

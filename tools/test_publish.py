@@ -114,6 +114,43 @@ class PublishTests(unittest.TestCase):
             P.request("POST", "https://api.github.com/test", data={"draft":True})
         self.assertEqual(opener.open.call_count, 1)
 
+    def test_current_version_runtime_archive_requires_matching_manifest_size_and_digest(self):
+        with tempfile.TemporaryDirectory(dir=self.root) as folder:
+            archive = Path(folder) / "runtime-win-x64.zip"
+            archive.write_bytes(b"synthetic runtime archive")
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            manifest = {"sha256": digest, "size": archive.stat().st_size}
+            P.verify_runtime_archive(manifest, archive)
+            invalid_manifests = (
+                {**manifest, "sha256": "0" * 64},
+                {**manifest, "size": manifest["size"] + 1},
+                {**manifest, "size": True},
+                {"size": manifest["size"]},
+            )
+            for invalid in invalid_manifests:
+                with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                    P.verify_runtime_archive(invalid, archive)
+            with self.assertRaisesRegex(RuntimeError, "尚未归档"):
+                P.verify_runtime_archive(manifest, Path(folder) / "missing.zip")
+
+    def test_current_version_publish_stops_before_release_when_runtime_archive_mismatches(self):
+        release_dir = self.root / "release"
+        release_dir.mkdir()
+        (release_dir / "hongguo-1.1.0-setup.exe").write_bytes(self.asset.read_bytes())
+        archive = release_dir / "runtime-win-x64.zip"
+        archive.write_bytes(b"synthetic archive from another build")
+        (self.root / "runtime-manifest.json").write_text(json.dumps({
+            "version": "1.1.0", "size": archive.stat().st_size, "sha256": "0" * 64
+        }), encoding="utf-8")
+        (self.root / "docs").mkdir()
+        (self.root / "docs/release-notes.md").write_text(
+            "红果桌面 1.1.0 · 2026-11-18 · 测试\n\n- 测试版本。", encoding="utf-8")
+        with patch.object(P, "ROOT", self.root), patch.object(P, "VERSION", "1.1.0"), \
+             patch.object(P, "make_release") as make:
+            with self.assertRaisesRegex(RuntimeError, "摘要与清单不符"):
+                P.publish("fixture")
+        make.assert_not_called()
+
     def test_new_release_is_verified_before_publication(self):
         github = GitHub()
         self.run_release(github)

@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {episodeDuration,availablePosition} from './timeline';
+import {adjacentEpisode,episodeDuration,availablePosition} from './timeline';
 describe('完整剧集时间轴',()=>{
   it('2秒到50秒的增长清单始终显示独立源179秒总长',()=>{
     for(const produced of [2.08,10.08,18.08,26.08,50.08])expect(episodeDuration(179.34,179,produced,false)).toBe(179.34);
@@ -11,4 +11,12 @@ describe('完整剧集时间轴',()=>{
     expect(episodeDuration(undefined,179,10,false)).toBe(179);
     const ranges={length:1,start:()=>0,end:()=>10};expect(availablePosition(8,ranges)).toBe(true);expect(availablePosition(143,ranges)).toBe(false);
   });
+});
+
+it('不完整片单按实际可播集号双向跳转，不把集号当成连续下标', () => {
+  const episodes = [8, 2, 4].map(index => ({ index }));
+  expect(adjacentEpisode(episodes, 2, 1)).toBe(4);
+  expect(adjacentEpisode(episodes, 4, -1)).toBe(2);
+  expect(adjacentEpisode(episodes, 2, -1)).toBeUndefined();
+  expect(adjacentEpisode(episodes, 8, 1)).toBeUndefined();
 });

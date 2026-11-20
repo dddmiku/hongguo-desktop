@@ -66,11 +66,16 @@ class SearchSuggestionsTests(unittest.TestCase):
             return {'items':rows,'offset':offset+len(rows),'passback':'','search_id':'fixture-search',
                     'hasMore':offset+len(rows)<46,'complete':True}
         self.sdk.search_page=Mock(side_effect=page)
-        rows=[];cursor=''
-        while True:
+        rows=[];cursor='';seen_cursors=set()
+        for _ in range(5):
             result=self.provider.search('无敌财神',cursor)
             rows.extend(result['items']);cursor=result['cursor']
             if not result['hasMore']:break
+            self.assertTrue(cursor)
+            self.assertNotIn(cursor,seen_cursors)
+            seen_cursors.add(cursor)
+        else:
+            self.fail('搜索未在预期页数内读完')
         self.assertEqual(len(rows),46);self.assertEqual(len({row['id'] for row in rows}),46)
         self.assertEqual(self.sdk.search_page.call_count,5)
 

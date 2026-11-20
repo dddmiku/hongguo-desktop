@@ -23,20 +23,25 @@ await context.addInitScript(()=>{
   const prefs={theme:'dark',quality:'1080p',rate:1,autoplay:true,volume:.8,cacheGB:4,closeToTray:true,bossKey:'CommandOrControl+Shift+B'};
   const hidden=new Set();
   const library=()=>({history:history.filter(i=>!hidden.has(i.series.id)).slice(0,50),historyTotal:120-hidden.size,favorites:[history[1].series,history[2].series]});
+  let account='fixture';
+  const accountListeners = new Set();
+  const session = () => ({loggedIn:true,uid:account,nickname:account,avatar:'',mobile:''});
+  window.__switchFixtureAccount=()=>{account='other-fixture';for(const fn of accountListeners) fn(session());};
+  window.__startDetailWait=false;
   window.__historyQueries=[];
   window.__mediaRequests=[];
   window.hongguo={
     request:async (route, options)=>{
-      if(route==='/account/session')return{loggedIn:true,uid:'fixture',nickname:'测试账号',avatar:'',mobile:''};
+      if(route==='/account/session')return session();
       if(route.startsWith('/catalog/series/') && route.includes('/seasons'))return{status:'single',currentSeason:1,seasons:[]};
-      if(route.startsWith('/catalog/series/')){const item=history.find(i=>route.endsWith(i.series.id));return{series:item.series,episodes:Array.from({length:10},(_,n)=>({index:n+1,vid:String(23456789+n),title:'第 '+(n+1)+' 集'})).filter(ep=>item!==history[1]||ep.index!==3)};}
+      if(route.startsWith('/catalog/series/')){if(window.__startDetailWait)await new Promise(resolve=>window.__finishDetail=resolve);const item=history.find(i=>route.endsWith(i.series.id));return{series:item.series,episodes:Array.from({length:10},(_,n)=>({index:n+1,vid:String(23456789+n),title:'第 '+(n+1)+' 集'})).filter(ep=>item!==history[1]||ep.index!==3)};}
       if(route==='/media/session'){window.__mediaRequests.push(options.body);return{id:'fixture-'+window.__mediaRequests.length,url:'#',phase:'ready'};}
       if(route.startsWith('/catalog'))return{items:history.slice(0,30).map(i=>i.series),hasMore:false};return{};
     },
     getSettings:async()=>prefs,saveSettings:async()=>prefs,getLibrary:async()=>library(),
     getHistory:async(query={})=>{window.__historyQueries.push(query);let rows=history.filter(i=>!hidden.has(i.series.id));if(query.search)rows=rows.filter(i=>i.series.title.includes(query.search));if(query.period==='today'){const today=new Date();today.setHours(0,0,0,0);rows=rows.filter(i=>i.watchedAt>=today.getTime()/1000);}const start=Number(query.cursor)||0;return{items:rows.slice(start,start+50),total:rows.length,nextCursor:start+50<rows.length?String(start+50):null};},
-    removeHistory:async id=>{hidden.add(id);return library();},syncLibrary:async()=>({library:library(),warnings:[]}),
-    onLibrary:()=>()=>{},onSettings:()=>()=>{},onSession:()=>()=>{},onUpdate:()=>()=>{},onVisibility:()=>()=>{},onShutdown:()=>()=>{},window:async()=>{},
+    removeHistory:async id=>{if(window.__startRemovalWait)await new Promise(resolve=>window.__finishRemoval=resolve);hidden.add(id);return library();},syncLibrary:async()=>({library:library(),warnings:[]}),
+    onLibrary:()=>()=>{},onSettings:()=>()=>{},onSession:fn=>{accountListeners.add(fn);return()=>accountListeners.delete(fn);},onUpdate:()=>()=>{},onVisibility:()=>()=>{},onShutdown:()=>()=>{},window:async()=>{},
     toggleFavorite:async()=>library(),openExternal:async()=>{},exportDiagnostics:async()=>'',saveProgress:async()=>{}
   };
 });
@@ -101,6 +106,27 @@ try{
   await page.screenshot({path:path.join(out,'history-fixture.png')});
   await page.getByRole('button',{name:'移除 历史剧 001 的本地记录'}).click();await page.waitForFunction(()=>!Array.from(document.querySelectorAll('.history-title')).some(node=>node.textContent==='历史剧 001'));passed('本机移除不在刷新后复活');
   await page.setViewportSize({width:960,height:740});await page.waitForTimeout(100);if(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth))throw new Error('窄窗历史界面溢出');passed('历史窄窗布局');
+  await page.evaluate(()=>{window.__startRemovalWait=true;});
+  await page.getByRole('button',{name:'移除 历史剧 002 的本地记录'}).click();
+  await expect.poll(()=>page.evaluate(()=>typeof window.__finishRemoval)).toBe('function');
+  await page.getByLabel('搜索观看历史').fill('003');
+  await expect(page.locator('.history-overview')).toContainText('匹配 1 部作品');
+  await expect(page.getByRole('button',{name:'历史剧 003',exact:true})).toBeVisible();
+  await page.evaluate(()=>window.__finishRemoval());
+  await expect(page.getByRole('button',{name:'移除 历史剧 003 的本地记录'})).toBeEnabled();
+  await expect(page.locator('.history-overview')).toContainText('匹配 1 部作品');
+  passed('历史删除进行中切换筛选，仍可查询且匹配数正确');
+
+  await page.getByRole('button',{name:'红果桌面首页',exact:true}).click();
+  await page.evaluate(()=>{window.__startDetailWait=true;});
+  await continuation.getByRole('button',{name:'继续观看 历史剧 003'}).click();
+  await expect.poll(()=>page.evaluate(()=>typeof window.__finishDetail)).toBe('function');
+  await expect(page.getByRole('dialog',{name:'剧集详情'})).toBeVisible();
+  await page.evaluate(()=>{window.__switchFixtureAccount();window.__finishDetail();});
+  await expect(page.getByRole('dialog',{name:'剧集详情'})).toHaveCount(0);
+  await expect(playback).toHaveCount(0);
+  passed('账号切换丢弃在途的旧续看请求');
+
   if(errors.length)throw new Error(errors.join('\n'));
 }catch(error){console.error(error.stack);checks.push({name:'历史验收',ok:false,error:error.message});process.exitCode=1;}
 finally{await writeFile(path.join(out,'result.json'),JSON.stringify({checks,errors},null,2));await context.close();await browser.close();await server.close();}

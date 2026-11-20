@@ -1,4 +1,5 @@
 import type { Episode, HistoryItem, HistoryQuery } from '../shared/contracts';
+import { adjacentEpisode } from './playback/timeline';
 
 export function seconds(value: number) { return value > 1e12 ? value / 1000 : value; }
 export function isHistoryFinished(item: HistoryItem) {
@@ -40,12 +41,11 @@ export function historyPlaybackTarget(episodes: Episode[], item?: HistoryItem): 
   if (!item) return { episode: episodes[0].index, position: 0, action: 'start' };
 
   const current = episodes.find(episode => episode.index === item.episode);
-  const next = episodes.reduce<Episode | undefined>((best, episode) =>
-    episode.index > item.episode && (!best || episode.index < best.index) ? episode : best, undefined);
+  const next = adjacentEpisode(episodes, item.episode, 1);
   if (current && !episodeFinished(item)) {
     return { episode: current.index, position: Number.isFinite(item.position) ? Math.max(0, item.position) : 0, action: 'resume' };
   }
-  if (next) return { episode: next.index, position: 0, action: 'next' };
+  if (next !== undefined) return { episode: next, position: 0, action: 'next' };
   if (current) return { episode: current.index, position: 0, action: 'replay' };
   return { episode: episodes[0].index, position: 0, action: 'start' };
 }

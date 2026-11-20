@@ -7,7 +7,7 @@ const root = process.cwd(), out = path.join(root, '_work', 'danmaku-qa'); await 
 const installed = process.argv.includes('--installed');
 const packaged = process.argv.includes('--packaged');
 const env = { ...process.env, HG_TEST_DATA_DIR: path.join(root, '_work', installed ? 'danmaku-installed-data' : packaged ? 'danmaku-packaged-data' : 'danmaku-data'), TEMP: out, TMP: out };
-const executable = installed ? path.join(process.env.LOCALAPPDATA, 'Programs', 'hongguo-desktop', '红果桌面.exe') : path.join(root, 'release', 'win-unpacked', '红果桌面.exe');
+const executable = installed ? path.join(process.env.LOCALAPPDATA, 'Programs', 'hongguo-desktop', '红果桌面.exe') : process.env.HG_QA_PACKAGED_PATH || path.join(root, 'release', 'win-unpacked', '红果桌面.exe');
 const launch = installed || packaged ? { executablePath: executable, args: [], env, timeout: 60000 } : { args: ['.'], cwd: root, env, timeout: 60000 };
 const instance = await electron.launch(launch);
 const page = await instance.firstWindow(), checks = [], errors = [];

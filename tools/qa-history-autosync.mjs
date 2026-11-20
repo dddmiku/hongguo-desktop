@@ -27,13 +27,17 @@ export class Supervisor {
   if(route==='/account/session')return {loggedIn:cloud.uid!=='local',uid:cloud.uid,nickname:'测试账号',avatar:'',mobile:''};
   if(route.startsWith('/account/history')) {
    const uid=cloud.uid,revision=cloud.revision,query=new URL('http://fixture'+route),cursor=query.searchParams.get('cursor');
+   if(${!baseline}&&query.searchParams.get('expectedUid')!==uid)throw new Error('fixture history account changed');
    cloud.reads.push({uid,revision,cursor});
    if(cloud.offline)throw new Error('fixture offline');
    if(cloud.hold)await new Promise(resolve=>cloud.releases.push(resolve));
    const rows=history(uid,revision),start=cursor?100:0;
    return {items:rows.slice(start,start+100),hasMore:!cursor,nextCursor:cursor?null:'older',complete:!!cursor,total:120};
   }
-  if(route==='/account/favorites')return {items:[]};
+  if(route==='/account/favorites'||route.startsWith('/account/favorites?')){
+   if(${!baseline}&&new URL('http://fixture'+route).searchParams.get('expectedUid')!==cloud.uid)throw new Error('fixture favorites account changed');
+   return {items:[]};
+  }
   if(route.startsWith('/catalog'))return {items:history(cloud.uid,0).slice(0,20).map(item=>item.series),hasMore:false};
   return {ok:true};
  }
@@ -51,14 +55,15 @@ try {
  await page.waitForSelector('.app-shell');
  await expect.poll(()=>page.evaluate(async()=> (await window.hongguo.getLibrary()).historyTotal),{timeout:3000}).toBeGreaterThanOrEqual(100);
  pass('启动时云历史自动写入SQLite');
- await page.waitForFunction(()=>document.querySelector('.continue-card small')?.textContent?.includes('第 1 集'));
+ const homeResume=page.getByRole('region',{name:'接着看',exact:true}).getByRole('button',{name:'继续观看 历史剧 001',exact:true});
+ await expect(homeResume).toContainText('第 1 集');
  await instance.evaluate(()=>{globalThis.cloud.revision=1;});await advance();await focus();
- await page.waitForFunction(()=>document.querySelector('.continue-card small')?.textContent?.includes('第 2 集'),undefined,{timeout:3000});
+ await expect(homeResume).toContainText('第 2 集',{timeout:3000});
  pass('停留首页时接着看自动刷新，无需进入历史页');
  await page.getByRole('button',{name:'设置',exact:true}).click();
  await instance.evaluate(()=>{globalThis.cloud.revision=2;});await advance();
  await page.getByRole('button',{name:'发现',exact:true}).click();
- await page.waitForFunction(()=>document.querySelector('.continue-card small')?.textContent?.includes('第 3 集'),undefined,{timeout:3000});
+ await expect(homeResume).toContainText('第 3 集',{timeout:3000});
  pass('从其他页面回首页自动刷新，保留片单');
  await page.getByRole('button',{name:'观看历史',exact:true}).click();
  await page.waitForSelector('.history-card');
@@ -110,7 +115,7 @@ try {
  await page.screenshot({path:path.join(out,'automatic-history.png')});
  if(errors.length)throw new Error(errors.join('\n'));
 }catch(error){
- const detail=await page.evaluate(async()=>({library:await window.hongguo.getLibrary(),firstCard:document.querySelector('.history-card .history-info p')?.textContent,home:document.querySelector('.continue-card small')?.textContent})).catch(()=>({}));
+ const detail=await page.evaluate(async()=>({library:await window.hongguo.getLibrary(),firstCard:document.querySelector('.history-card .history-info p')?.textContent,home:document.querySelector('.discovery-resume small')?.textContent})).catch(()=>({}));
  const cloud=await instance.evaluate(()=>({reads:globalThis.cloud.reads,uid:globalThis.cloud.uid,revision:globalThis.cloud.revision})).catch(()=>({}));
  checks.push({name:'历史自动同步',ok:false,error:error.message,detail,cloud});console.error(error.stack);process.exitCode=1;
 }

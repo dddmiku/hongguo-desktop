@@ -20,6 +20,7 @@ const server = createServer(async (req, res) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const mediaUrl = `http://127.0.0.1:${server.address().port}/sample.m3u8`;
 const installed = process.argv.includes('--installed'), packaged = process.argv.includes('--packaged'), checks = [], errors = [];
+const packagedPath = process.env.HG_QA_PACKAGED_PATH || path.join(root, 'release/win-unpacked/红果桌面.exe');
 const resultName = installed ? 'installed' : packaged ? 'packaged' : 'source';
 let instance, page;
 const check = (name, ok, detail) => { checks.push({ name, ok, detail }); console.log(JSON.stringify(checks.at(-1))); if (!ok) throw new Error(name); };
@@ -107,7 +108,7 @@ const inspectShortcutDialog = async (mode, fullscreen, theater) => {
   return entries;
 };
 try {
-  instance = await electron.launch({ ...(installed || packaged ? { executablePath: installed ? path.join(process.env.LOCALAPPDATA, 'Programs/hongguo-desktop/红果桌面.exe') : path.join(root, 'release/win-unpacked/红果桌面.exe'), args: [] } : { args: ['.'], cwd: root }), env: { ...process.env, HG_TEST_DATA_DIR: path.join(out, installed ? 'installed-profile' : packaged ? 'packaged-profile' : 'profile'), HG_TEST_BACKGROUND: '1', TEMP: out, TMP: out }, timeout: 60000 });
+  instance = await electron.launch({ ...(installed || packaged ? { executablePath: installed ? path.join(process.env.LOCALAPPDATA, 'Programs/hongguo-desktop/红果桌面.exe') : packagedPath, args: [] } : { args: ['.'], cwd: root }), env: { ...process.env, HG_TEST_DATA_DIR: path.join(out, installed ? 'installed-profile' : packaged ? 'packaged-profile' : 'profile'), HG_TEST_BACKGROUND: '1', TEMP: out, TMP: out }, timeout: 60000 });
   page = await instance.firstWindow();
   page.on('pageerror', error => errors.push(error.name));
   await instance.evaluate(({ ipcMain }, url) => {
@@ -116,7 +117,7 @@ try {
     ipcMain.removeHandler('api:request');
     ipcMain.handle('api:request', (_event, route, options = {}) => {
       if (route === '/account/session') return { loggedIn: false, uid: '', nickname: '', avatar: '', mobile: '' };
-      if (route === '/catalog/series/' + series.id) return { series, episodes: Array.from({ length: 80 }, (_, index) => ({ index: index + 1, vid: '9999999999999999992', title: `第 ${index + 1} 集`, duration: 120 })) };
+      if (route === '/catalog/series/' + series.id) return { series, episodes: Array.from({ length: 80 }, (_, index) => ({ index: index + 1, vid: '9999999999999999992', title: `第 ${index + 1} 集`, duration: 120 })).filter(episode => episode.index !== 2) };
       if (route.includes('/seasons')) return { seriesId: series.id, status: 'single', currentSeason: 1, seasons: [], complete: true };
       if (route.startsWith('/catalog/comments')) return { items: [], total: 0, cursor: 0, hasMore: false };
       if (route.startsWith('/catalog/danmaku')) return { items: [], start: 0, end: 120, hasMore: false, seriesId: series.id, vid: '9999999999999999992', source: 'mobile' };
@@ -225,8 +226,8 @@ try {
   await page.keyboard.press('Escape');
   check('Esc先关闭弹幕设置再退出窗口全屏', !await page.getByRole('dialog', { name: '弹幕设置' }).count() && await page.locator('.player-theater').count() === 1);
   await page.keyboard.press('j');
-  await page.waitForFunction(() => document.querySelector('video[data-active=true]')?.dataset.episode === '2', undefined, { timeout: 20000 });
-  check('窗口全屏切集保持布局与实际解码', fillsWindow(await geometry()) && await page.locator('video[data-active=true]').evaluate(node => node.videoWidth > 0 && !node.paused));
+  await page.waitForFunction(() => document.querySelector('video[data-active=true]')?.dataset.episode === '3', undefined, { timeout: 20000 });
+  check('窗口全屏切集跳过缺号并保持布局与实际解码', fillsWindow(await geometry()) && await page.locator('video[data-active=true]').evaluate(node => node.videoWidth > 0 && !node.paused));
   await hover(); await page.getByTitle('暂停（空格）').click();
   const pausedPosition = await observeSeeks();
   await page.keyboard.press('ArrowRight');
@@ -253,6 +254,9 @@ try {
   await page.waitForFunction(() => !document.querySelector('.player-theater'));
   await page.keyboard.press('t'); await page.keyboard.press('Control+k'); await page.keyboard.press('Escape');
   await page.waitForFunction(() => !document.querySelector('.player-theater'));
+  await page.getByRole('button', { name: '上一集', exact: true }).click();
+  await page.waitForFunction(() => { const video = document.querySelector('video[data-active=true]'); return video?.dataset.episode === '1' && video.videoWidth > 0; });
+  check('上一集同样按可播放列表跳过缺号', true);
   await page.getByRole('button', { name: '返回', exact: true }).click();
   check('结束播放后恢复首页与顶部栏', !await page.locator('.player-page').count() && await page.locator('.app-header').isVisible());
   await page.locator('.header-settings').click();

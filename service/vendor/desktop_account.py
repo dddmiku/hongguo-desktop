@@ -1024,10 +1024,11 @@ def set_favorite(series_id, favorite):
         return {'ok': False, 'code': j.get('code'), 'error': j.get('message')}
     return {'ok': True, 'favorite': bool(favorite)}
 
-def remote_favorites():
-    if not is_logged_in():
+def remote_favorites(session=None):
+    session = dict(load_session() if session is None else session)
+    if not (session.get('cookie') or session.get('token')):
         return {'ok': False, 'error': '未登录红果账号'}
-    r = _call('GET', '/reading/bookapi/bookshelf/video/list/v')
+    r = _call('GET', '/reading/bookapi/bookshelf/video/list/v', session=session)
     j = _json(r)
     if j.get('code') not in (0, '0'):
         return {'ok': False, 'code': j.get('code'), 'error': j.get('message')}
@@ -1043,6 +1044,7 @@ def remote_favorites():
             x['title'] = m.get('title') or ''
             x['cover'] = m.get('cover') or ''
             x['episodeCount'] = int(m.get('episodeCount') or 0)
+            x['actors'] = m.get('actors') or []
     return {'ok': True, 'items': items}
 
 def _series_meta(series_ids):
@@ -1057,7 +1059,9 @@ def _series_meta(series_ids):
         for sid, meta in (series_map or {}).items():
             if not isinstance(meta, dict):
                 continue
-            out[str(sid)] = {'title': meta.get('title') or '', 'cover': meta.get('cover') or '', 'episodeCount': int(meta.get('episode_cnt') or meta.get('episodeCount') or 0)}
+            out[str(sid)] = {'title': meta.get('title') or '', 'cover': meta.get('cover') or '',
+                             'episodeCount': int(meta.get('episode_cnt') or meta.get('episodeCount') or 0),
+                             'actors': meta.get('celebrities') or meta.get('actors') or []}
     except Exception:
         pass
     return out

@@ -49,7 +49,8 @@ try{
  const seen=new Set(),samples=[];
  await page.locator('video[data-active=true]').evaluate(v=>{v.currentTime=20;});
  await page.waitForFunction(()=>document.querySelector('video[data-active=true]').currentTime>=20&&!document.querySelector('video[data-active=true]').paused);
- while(true){const s=await page.evaluate(()=>{const v=document.querySelector('video[data-active=true]'),c=document.querySelector('.danmaku-canvas');return {time:v.currentTime,paused:v.paused,text:c.getAttribute('aria-label'),count:Number(c.dataset.activeCount)};});samples.push(s);for(const item of [...first.items,...later.items])if(s.text.includes(item.text))seen.add(item.id);if(s.time>=45)break;await page.waitForTimeout(150);}
+ const deadline=Date.now()+90000;
+ while(true){if(Date.now()>=deadline)throw new Error('弹幕取样超时');const s=await page.evaluate(()=>{const v=document.querySelector('video[data-active=true]'),c=document.querySelector('.danmaku-canvas');return {time:v.currentTime,paused:v.paused,text:c.getAttribute('aria-label'),count:Number(c.dataset.activeCount)};});samples.push(s);for(const item of [...first.items,...later.items])if(s.text.includes(item.text))seen.add(item.id);if(s.time>=45)break;await page.waitForTimeout(150);}
  const boundary=samples.filter(s=>s.time>=28&&s.time<=33&&!s.paused);
  check('一倍半播放跨时间段持续显示真实弹幕',boundary.length>5&&boundary.filter(s=>s.count>0).length/boundary.length>.9&&later.items.some(item=>seen.has(item.id)),{samples:boundary.length,nonempty:boundary.filter(s=>s.count>0).length,seen:seen.size});
  await writeFile(path.join(out,'continuity.json'),JSON.stringify(samples,null,2));await page.keyboard.press('k');await page.screenshot({path:path.join(out,'feedback.png')});

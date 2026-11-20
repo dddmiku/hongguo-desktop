@@ -36,6 +36,7 @@ from qr_login import QrLoginManager, QrLoginError
 
 
 GENRES = {"short_play", "comic_series", "ai_series"}
+ACCOUNT_UID_MAX_LENGTH = 512
 QUALITIES = {"auto", "1080p", "720p", "540p", "480p", "360p"}
 SORTS = {"online_time", "hot_score", "hot_collect"}
 CODECS = {"bytevc1", "hevc", "h265", "hvc1", "avc1", "h264"}
@@ -735,8 +736,8 @@ class Provider:
         if refresh: self.cache.invalidate(key)
         return self.cache.get(key, 60, lambda: self._read("读取手机弹幕", read))
 
-    def session(self):
-        value = self.account.public_session()
+    def session(self, credentials=None):
+        value = self.account.public_session() if credentials is None else self.account.public_session(credentials)
         return {"loggedIn": bool(value.get("loggedIn")), "uid": str(value.get("uid") or ""),
                 "nickname": str(value.get("userName") or ""), "avatar": "", "mobile": str(value.get("mobile") or "")}
 
@@ -753,14 +754,14 @@ class Provider:
             self._last_progress.clear()
             return self.session()
 
-    def _require_login(self):
-        session = self.session()
+    def _require_login(self, credentials=None):
+        session = self.session(credentials)
         if not session["loggedIn"]:
             raise ProviderError("LOGIN_REQUIRED", "请先登录红果账号", 401)
         return session
 
-    def _expect_uid(self, expected_uid):
-        session = self._require_login()
+    def _expect_uid(self, expected_uid, credentials=None):
+        session = self._require_login(credentials)
         if not isinstance(expected_uid, str) or not expected_uid or session["uid"] != expected_uid:
             raise ProviderError("ACCOUNT_CHANGED", "账号已切换，已取消旧账号的操作", 409)
         return session
@@ -769,7 +770,7 @@ class Provider:
         """Private migration boundary, called by Electron main; no cloud writes."""
         if not isinstance(payload, dict):
             raise ProviderError("INPUT_INVALID", "登录态格式不正确", 400)
-        allowed = {"uid": 512, "token": 8192, "cookie": 16384, "user_name": 200,
+        allowed = {"uid": ACCOUNT_UID_MAX_LENGTH, "token": 8192, "cookie": 16384, "user_name": 200,
                    "mobile": 20, "avatar": 2000, "saved_at": 32}
         session = {}
         for key, limit in allowed.items():
@@ -780,7 +781,7 @@ class Provider:
                 raise ProviderError("INPUT_INVALID", "登录态格式不正确", 400)
             session[key] = value
         uid = session.get("uid")
-        if (not isinstance(uid, str) or not re.fullmatch(r"[A-Za-z0-9#_+./=-]{1,512}", uid)
+        if (not isinstance(uid, str) or not re.fullmatch(r"[A-Za-z0-9#_+./=-]+", uid)
                 or not any(isinstance(session.get(key), str) and session[key].strip() for key in ("token", "cookie"))):
             raise ProviderError("INPUT_INVALID", "旧版本没有可迁移的有效登录态", 400)
         with self._write_lock:
@@ -914,12 +915,12 @@ class Provider:
         except (ValueError, TypeError, AttributeError, KeyError):
             raise ProviderError("HISTORY_CURSOR_INVALID", "历史同步位置已失效，请重新同步", 400) from None
 
-    def history(self, cursor="", limit=100, refresh=False):
+    def history(self, cursor="", limit=100, refresh=False, expected_uid=None):
         """Read one real server page, retaining every returned row and original times."""
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
             raise ProviderError("INPUT_INVALID", "历史页大小不正确", 400)
-        session = self._require_login()
         credentials = dict(self.account.load_session() or {})
+        session = self._expect_uid(expected_uid, credentials) if expected_uid is not None else self._require_login(credentials)
         identity = self.account._session_identity(credentials)
         state = self._history_state(cursor, session["uid"], identity)
         key = ("history-page", session["uid"], identity, state["offset"], limit)
@@ -986,16 +987,25 @@ class Provider:
                 "total": number(response.get("total")), "hasMore": has_more, "nextCursor": next_cursor,
                 "complete": not has_more and not warning, **({"warning": warning} if warning else {})}
 
-    def favorites(self):
-        session = self._require_login()
+    def favorites(self, expected_uid=None):
+        credentials = dict(self.account.load_session() or {})
+        session = self._expect_uid(expected_uid, credentials) if expected_uid is not None else self._require_login(credentials)
+        identity = self.account._session_identity(credentials)
+
+        def ensure_current():
+            if self.account._account_changed(credentials) or self.session()["uid"] != session["uid"]:
+                raise ProviderError("ACCOUNT_CHANGED", "账号已切换，请重新同步", 409)
+
         def read():
-            response = self.account.remote_favorites()
+            response = self.account.remote_favorites(session=credentials)
+            ensure_current()
             if not response.get("ok"):
                 raise ProviderError("FAVORITES_UNAVAILABLE", "云端收藏暂时无法读取，请稍后重试")
-            if self.session()["uid"] != session["uid"]:
-                raise ProviderError("ACCOUNT_CHANGED", "账号已切换，请重新同步", 409)
             return self._list(response.get("items"))
-        return {"items": self.cache.get(("favorites", session["uid"]), 15, lambda: self._read("读取收藏", read))}
+
+        items = self.cache.get(("favorites", session["uid"], identity), 15, lambda: self._read("读取收藏", read))
+        ensure_current()
+        return {"items": items}
 
     def _remote_playback_progress(self, sid, session):
         """Read fresh resume data for one series; this POST is a read-only RPC."""
@@ -1437,11 +1447,18 @@ class Provider:
             self._prune_sources()
             return out
         finally:
-            for path in (encrypted, raw, partial):
-                path.unlink(missing_ok=True)
-            with self._source_guard:
-                self._sources_running.discard(key)
-                self._source_guard.notify_all()
+            try:
+                for path in (encrypted, raw, partial):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        # A temporary file may still be held open by a scanner.
+                        # Release the download slot even when cleanup must wait.
+                        pass
+            finally:
+                with self._source_guard:
+                    self._sources_running.discard(key)
+                    self._source_guard.notify_all()
 
     def _remux(self, raw, output, cancelled):
         import av

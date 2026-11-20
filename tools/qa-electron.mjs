@@ -25,11 +25,19 @@ try{
   await page.screenshot({path:path.join(out,'player.png')});
   await page.getByTitle('评论',{exact:true}).click();await page.waitForSelector('.comments-panel');
   await page.waitForFunction(()=>!document.querySelector('.comments-list .loading-state'),undefined,{timeout:60000});if(await page.locator('.comment-error').count())throw new Error('评论接口失败');pass('真实评论加载',{items:await page.locator('.comment').count()});
-  const initial=Number((await page.locator('.player-heading span').innerText()).match(/第\s*(\d+)/)?.[1]);await page.locator('.video-stage').hover({position:{x:20,y:20}});await page.getByTitle('下一集（J）').click();
-  await page.waitForFunction(expected=>document.querySelector('.player-heading span')?.textContent?.includes(`第 ${expected} 集`),initial+1,{timeout:20000});
-  await page.waitForFunction(()=>{const v=document.querySelector('video[data-active=true]');return v&&v.currentTime>2&&!v.paused;},undefined,{timeout:180000});pass('连续切集播放');
+  const initial=await page.locator('video[data-active=true]').getAttribute('data-episode');
+  await page.locator('.video-stage').hover({position:{x:20,y:20}});await page.getByTitle('下一集（J）').click();
+  await page.waitForFunction(previous=>{
+    const video=document.querySelector('video[data-active=true]');
+    return video?.dataset.episode && video.dataset.episode!==previous
+      && video.currentTime>2 && video.videoWidth>0 && !video.paused;
+  },initial,{timeout:180000});pass('连续切集播放');
   await page.locator('.video-stage').hover({position:{x:20,y:20}});await page.getByLabel('播放倍速').selectOption('3');await page.waitForFunction(()=>document.querySelector('video[data-active=true]').playbackRate===3);await page.getByLabel('播放倍速').selectOption('2');await page.waitForTimeout(3500);const speed=await page.evaluate(()=>({focus:document.activeElement.tagName,rate:document.querySelector('video[data-active=true]').playbackRate,hidden:!!document.querySelector('.controls-hidden')}));if(speed.rate!==2||speed.focus==='SELECT'||!speed.hidden)throw new Error('倍速或控制栏未生效：'+JSON.stringify(speed));pass('倍速与控制栏收起',speed);
-  await page.evaluate(()=>window.hongguo.window('close'));await page.waitForTimeout(500);pass('关闭到托盘暂停',await page.locator('video[data-active=true]').evaluate(v=>v.paused));
+  await page.evaluate(()=>window.hongguo.saveSettings({closeToTray:true}));
+  await page.evaluate(()=>window.hongguo.window('close'));
+  await page.waitForFunction(()=>document.querySelector('video[data-active=true]')?.paused,undefined,{timeout:5000});
+  if(await instance.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().some(window=>window.isVisible())))throw new Error('关闭后窗口未收入托盘');
+  pass('关闭到托盘暂停');
   await instance.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0].show());
   await page.getByRole('button',{name:'返回',exact:true}).click();
   await page.getByRole('button',{name:'我的片库',exact:true}).click();await page.getByRole('dialog',{name:'我的片库'}).getByRole('button',{name:'观看历史',exact:true}).first().click();await page.waitForTimeout(500);const entries=await page.locator('.history-card').count();if(!entries)throw new Error('观看记录未保存');pass('本地观看记录',{entries});

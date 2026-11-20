@@ -38,6 +38,7 @@ class ProviderTests(unittest.TestCase):
             save_session=Mock(), set_favorite=Mock(return_value={"ok": True}),
             _history_all_cached=Mock(return_value=([], 0, True, "", False)),
             remote_progress=Mock(return_value={"ok": True, "episode": 0, "updatedAt": 0, "reason": "absent"}),
+            remote_favorites=Mock(return_value={"ok": True, "items": []}),
             _session_identity=Mock(return_value="synthetic-identity"), _account_changed=Mock(return_value=False),
             remote_history_page=Mock(return_value={"ok": True, "items": [], "total": 0, "nextOffset": 0, "hasMore": False}),
             _call=Mock(return_value={"code": 0, "data": {}, "video_data": []}), _json=lambda response: response)
@@ -160,6 +161,34 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaises(ProviderError) as error:
             self.provider.history()
         self.assertEqual(error.exception.code, "ACCOUNT_CHANGED")
+
+    def test_library_reads_use_the_requested_account_snapshot(self):
+        self.account.public_session.side_effect = lambda credentials=None: {
+            "loggedIn": True,
+            "uid": (credentials if credentials is not None else self.account.load_session())["uid"],
+        }
+        self.provider.history(expected_uid="synthetic-user")
+        self.provider.favorites(expected_uid="synthetic-user")
+        self.assertEqual(self.account.remote_history_page.call_args.kwargs["session"]["uid"], "synthetic-user")
+        self.assertEqual(self.account.remote_favorites.call_args.kwargs["session"]["uid"], "synthetic-user")
+        self.account.load_session.return_value = {"uid": "other-account"}
+        for read in (self.provider.history, self.provider.favorites):
+            with self.assertRaises(ProviderError) as result:
+                read(expected_uid="synthetic-user")
+            self.assertEqual(result.exception.code, "ACCOUNT_CHANGED")
+        self.assertEqual(self.account.remote_history_page.call_count, 1)
+        self.assertEqual(self.account.remote_favorites.call_count, 1)
+
+    def test_library_routes_accept_opaque_uids_supported_by_session_migration(self):
+        uid = "#fixture_" + "Q" * 499 + "+/=="
+        self.account.load_session.return_value = {"uid": uid}
+        self.account.public_session.return_value = {"loggedIn": True, "uid": uid}
+        with TestClient(create_app(self.provider, "a" * 64)) as client:
+            for route in ("/account/history", "/account/favorites"):
+                with self.subTest(route=route):
+                    response = client.get(route, params={"expectedUid": uid}, headers={"Authorization": "Bearer " + "a" * 64})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.json()["items"], [])
 
     def test_discover_respects_selected_genre_and_recommend_uses_feed(self):
         self.assertEqual(self.provider.home("short_play")["items"][0]["title"], "测试真人剧")

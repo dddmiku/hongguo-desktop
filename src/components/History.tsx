@@ -16,14 +16,13 @@ interface Props {
 export default function History({ onOpen, onRemove, onSync, syncing, revision, notify }: Props) {
   const [search, setSearch] = useState(''), [keyword, setKeyword] = useState(''), [period, setPeriod] = useState<HistoryQuery['period']>('all'), [status, setStatus] = useState<HistoryQuery['status']>('all');
   const [items, setItems] = useState<HistoryItem[]>([]), [total, setTotal] = useState(0), [cursor, setCursor] = useState<string | null>(null), [loading, setLoading] = useState(true), [moreLoading, setMoreLoading] = useState(false), [error, setError] = useState(''), [retry, setRetry] = useState(0), [removing, setRemoving] = useState('');
-  const generation = useRef(0), scope = useRef(''), mutation = useRef(false);
+  const generation = useRef(0), scope = useRef('');
   const loadedCount=useRef(50);
   const [windowStart, setWindowStart] = useState(0);
   const [failedMore, setFailedMore] = useState(false);
   const query = normalizeHistoryQuery({ search: keyword, period, status });
   useEffect(() => { const timer = setTimeout(() => setKeyword(search.trim()), 250); return () => clearTimeout(timer); }, [search]);
   useEffect(() => {
-    if (mutation.current) { mutation.current = false; return; }
     const id = ++generation.current, key = JSON.stringify(query); setLoading(true); setError(''); setMoreLoading(false);setFailedMore(false);
     const changed=scope.current!==key,count=changed?50:Math.max(50,loadedCount.current);
     if (changed) { loadedCount.current=50;setItems([]); setCursor(null); setTotal(0);setWindowStart(0); } scope.current = key;
@@ -47,9 +46,14 @@ export default function History({ onOpen, onRemove, onSync, syncing, revision, n
     finally { if (id === generation.current) setMoreLoading(false); }
   };
   const remove = async (id: string) => {
-    if (removing) return; setRemoving(id); mutation.current=true;
-    try { await onRemove(id); setItems(current => current.filter(item => item.series.id !== id)); setTotal(value => Math.max(0, value - 1)); notify('已移除此设备的记录，手机记录不受影响'); }
-    catch(error) { mutation.current=false;notify(message(error)); }
+    if (removing) return;
+    setRemoving(id);
+    try {
+      // The library revision reloads the active query, including its count and cursor.
+      await onRemove(id);
+      notify('已移除此设备的记录，手机记录不受影响');
+    }
+    catch (error) { notify(message(error)); }
     finally { setRemoving(''); }
   };
   const filtered = !!keyword || period !== 'all' || status !== 'all';

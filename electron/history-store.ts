@@ -26,6 +26,8 @@ export class HistoryStore {
       const old=existing.get(uid,item.series.id) as Record<string,unknown>|undefined;
       if(old){const metadata=JSON.parse(String(old.series_json));item.series={...metadata,...item.series,intro:item.series.intro||metadata.intro||'',tags:item.series.tags?.length?item.series.tags:metadata.tags||[],actors:item.series.actors?.length?item.series.actors:metadata.actors||[],totalEpisodes:item.series.totalEpisodes||metadata.totalEpisodes||0};}
       if(old&&Number(old.watched_at)>item.watchedAt)continue;
+      // The mobile history endpoint has no reliable per-episode duration.
+      if(old&&Number(old.episode)===item.episode&&!item.duration)item.duration=Number(old.duration);
       if(old&&Number(old.watched_at)===item.watchedAt&&!local){
         if(Number(old.episode)===item.episode){item.position=Math.max(Number(old.position),item.position);item.duration=Math.max(Number(old.duration),item.duration);}
         else continue;

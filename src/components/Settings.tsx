@@ -18,13 +18,20 @@ export default function Settings({ settings, onChange, notify }: { settings: Pre
   const [cache, setCache] = useState<CacheStatus | null>(null), [health, setHealth] = useState<Health | null>(null), [cacheBusy, setCacheBusy] = useState(false), [confirmClear, setConfirmClear] = useState(false);
   const [checking, setChecking] = useState(false), [update, setUpdate] = useState<UpdateInfo | null>(null), [checked, setChecked] = useState(false), [task, setTask] = useState<UpdateTask | null>(null), [downloadBusy, setDownloadBusy] = useState(false);
   const [bossKey, setBossKey] = useState(displayShortcut(settings.bossKey)), [diagnostic, setDiagnostic] = useState(''), [exporting, setExporting] = useState(false), [error, setError] = useState('');
-  useEffect(() => { let active = true; window.hongguo.request<CacheStatus>('/media/cache').then(v => { if (active) setCache(v); }).catch(e => { if (active) setError(message(e)); }); window.hongguo.request<Health>('/health').then(v => { if (active) setHealth(v); }).catch(e => { if (active) setHealth({ ok: false, signer: false, version: '', error: message(e) }); }); const unsubscribe = window.hongguo.onUpdate(v => { if (active) { setTask(v); if (['done', 'error', 'cancelled'].includes(v.phase)) setDownloadBusy(false); } }); return () => { active = false; unsubscribe(); }; }, []);
+  useEffect(() => { let active = true; window.hongguo.request<CacheStatus>('/media/cache').then(v => { if (active) setCache(v); }).catch(e => { if (active) setError(message(e)); }); window.hongguo.request<Health>('/health').then(v => { if (active) setHealth(v); }).catch(e => { if (active) setHealth({ ok: false, signer: false, version: '', error: message(e) }); }); const unsubscribe = window.hongguo.onUpdate(v => { if (active) setTask(v); }); return () => { active = false; unsubscribe(); }; }, []);
   useEffect(() => { setBossKey(displayShortcut(settings.bossKey)); }, [settings.bossKey]);
   const save = (patch: Partial<Preferences>) => { setError(''); void onChange(patch).catch(e => setError(message(e))); };
   const saveShortcut = () => { const value = shortcut(bossKey); if (!value) { setError('快捷键格式不正确，例如 Ctrl+Shift+B、Alt+B。'); return; } save({ bossKey: value }); };
   const clear = async () => { setCacheBusy(true); setError(''); try { const data = await window.hongguo.request<CacheStatus>('/media/cache/clear', { method: 'POST' }); setCache(data); setConfirmClear(false); notify('闲置播放缓存已清理'); } catch (e) { setError(message(e)); } finally { setCacheBusy(false); } };
   const checkUpdate = async () => { setChecking(true); setError(''); try { setUpdate(await window.hongguo.checkUpdate()); setChecked(true); } catch (e) { setError(message(e)); } finally { setChecking(false); } };
-  const download = async () => { if (!update?.available || downloadBusy) return; setDownloadBusy(true); setError(''); try { await window.hongguo.downloadUpdate(update); } catch (e) { setError(message(e)); setDownloadBusy(false); } };
+  const download = async () => {
+    if (!update?.available || downloadBusy) return;
+    setDownloadBusy(true);
+    setError('');
+    try { await window.hongguo.downloadUpdate(update); }
+    catch (error) { setError(message(error)); }
+    finally { setDownloadBusy(false); }
+  };
   const exportDiagnostic = async () => { setExporting(true); try { const path = await window.hongguo.exportDiagnostics(); if (path) { setDiagnostic(path); notify('诊断文件已导出'); } } catch (e) { setError(message(e)); } finally { setExporting(false); } };
   const reconnect = async () => { try { setHealth(await window.hongguo.request<Health>('/health')); notify('播放服务状态已更新'); } catch (e) { setError(message(e)); } };
   return <div className="settings-page"><div className="page-heading"><div><h1>设置</h1><p>管理播放偏好、缓存空间与窗口行为。</p></div></div><div className="settings-sections">

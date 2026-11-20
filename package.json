@@ -1,6 +1,6 @@
 {
   "name": "hongguo-desktop",
-  "version": "1.4.8",
+  "version": "1.4.9",
   "private": true,
   "description": "红果桌面客户端，全新源码架构",
   "author": "dddmiku",
@@ -11,27 +11,30 @@
     "build": "npm run typecheck && vite build && node tools/build-electron.mjs",
     "start": "electron .",
     "test": "vitest run",
-    "package": "npm run build && electron-builder --win nsis --x64",
+    "package": "npm run build && install-electron && electron-builder --win nsis --x64",
     "verify": "npm run typecheck && npm test"
   },
   "dependencies": {
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
+    "hls.js": "^1.6.13",
     "lucide-react": "^0.468.0",
-    "hls.js": "^1.6.13"
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/node": "^24.10.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
-    "@types/node": "^24.10.0",
     "@vitejs/plugin-react": "^5.1.0",
-    "vite": "^7.2.0",
-    "typescript": "^5.9.3",
-    "electron": "^39.0.0",
-    "electron-builder": "^26.0.12",
+    "electron": "45.4.1",
+    "electron-builder": "26.18.1",
     "esbuild": "^0.25.12",
-    "vitest": "^3.2.4",
-    "@playwright/test": "^1.56.1"
+    "typescript": "^5.9.3",
+    "vite": "^7.2.0",
+    "vitest": "5.1.1"
+  },
+  "overrides": {
+    "minimatch@>=7.0.0 <11.0.1": "11.0.1"
   },
   "build": {
     "appId": "dev.dddmiku.hongguo.desktop",

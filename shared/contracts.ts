@@ -18,7 +18,7 @@ export interface DanmakuPage { items: DanmakuItem[]; start: number; end: number;
 export interface MediaSession { id: string; url: string; phase: 'preparing' | 'ready' | 'complete' | 'error' | 'cancelled'; error?: string; cached?: boolean; quality?: string; duration?: number; delivery?: 'remux' | 'transcode'; videoCodec?: string; }
 export interface CacheStatus { bytes: number; limit: number; entries: number; active: number; }
 export interface Health { ok: boolean; version: string; signer: boolean; error?: string; }
-export interface PlaybackProgress { series: Series; episode: number; position: number; duration: number; }
+export interface PlaybackProgress { series: Series; episode: number; position: number; duration: number; expectedUid?: string; }
 export interface UpdateInfo { available: boolean; version: string; notes: string; url: string; sha256: string; }
 export interface UpdateTask { phase: string; downloaded: number; total: number; error?: string; }
 export interface NativeBridge {

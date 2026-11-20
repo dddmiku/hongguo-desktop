@@ -2,9 +2,10 @@
 from pathlib import Path
 import sys
 import tempfile
+import time
 import types
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import requests
 
 ROOT=Path(__file__).resolve().parents[2]
@@ -187,6 +188,33 @@ class PlaybackChannelTests(unittest.TestCase):
         second=self.provider.source('12345678',54);self.provider.release_source(second)
         self.assertEqual(first,second)
         self.sdk.get_video_tracks.assert_called_once()
+
+    def test_cancelled_download_releases_slot_if_temporary_file_cannot_be_removed(self):
+        stopped = False
+
+        def interrupted(url, output, cancelled):
+            nonlocal stopped
+            output.write_bytes(b'incomplete-source')
+            stopped = True
+            cancelled()
+
+        original_unlink = Path.unlink
+
+        def file_temporarily_in_use(path, *args, **kwargs):
+            if stopped and path.name.endswith('.encrypted.partial'):
+                raise PermissionError('fixture temporary file still in use')
+            return original_unlink(path, *args, **kwargs)
+
+        self.provider.source_downloader.download.side_effect = interrupted
+        with patch.object(Path, 'unlink', file_temporarily_in_use), self.assertRaises(ProviderError) as caught:
+            self.provider.source('12345678', 54, cancelled=lambda: stopped)
+        self.assertEqual(caught.exception.code, 'MEDIA_CANCELLED')
+        self.sdk.get_video_tracks.return_value = {'23456789': [self.fresh]}
+        self.provider.source_downloader.download.side_effect = lambda url, output, cancelled: output.write_bytes(b'new-source')
+        deadline = time.monotonic() + 1
+        retry = self.provider.source('12345678', 54, cancelled=lambda: time.monotonic() > deadline)
+        self.assertEqual(retry.read_bytes(), b'new-source')
+        self.provider.release_source(retry)
 
     def test_official_website_rescues_unavailable_mobile_model_for_the_same_episode(self):
         self.sdk.get_video_tracks.side_effect=RuntimeError('controlled unavailable mobile model')

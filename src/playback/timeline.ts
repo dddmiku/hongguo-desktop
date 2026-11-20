@@ -7,3 +7,13 @@ export function availablePosition(position:number,ranges:{length:number;start(in
   for(let i=0;i<ranges.length;i++)if(position>=ranges.start(i)-.2&&position<=ranges.end(i)-.1)return true;
   return false;
 }
+
+/** Episode numbers can have gaps when a title has unavailable episodes. */
+export function adjacentEpisode(episodes: readonly { index: number }[], current: number, direction: 1 | -1) {
+  let closest: number | undefined;
+  for (const { index } of episodes) {
+    if ((index - current) * direction <= 0) continue;
+    if (closest === undefined || (index - closest) * direction < 0) closest = index;
+  }
+  return closest;
+}

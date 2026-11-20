@@ -55,12 +55,28 @@ def parse_track_samples(d, handler=b'vide'):
         ch = [struct.unpack('>Q', d[co64[0] + 8 + 8 * i:co64[0] + 16 + 8 * i])[0] for i in range(n)]
     ne = _u32(d, stsc[0] + 4)
     runs = [(_u32(d, stsc[0] + 8 + 12 * i), _u32(d, stsc[0] + 12 + 12 * i), _u32(d, stsc[0] + 16 + 12 * i)) for i in range(ne)]
+    if runs:
+        if runs[0][0] != 1:
+            raise ValueError("Invalid MP4 stsc first_chunk")
+        previous = 0
+        mapped_samples = 0
+        for index, (first_chunk, samples_per_chunk, sample_description) in enumerate(runs):
+            if first_chunk <= previous or first_chunk > len(ch):
+                raise ValueError("Invalid MP4 stsc chunk order")
+            if samples_per_chunk < 1 or sample_description < 1:
+                raise ValueError("Invalid MP4 stsc entry")
+            next_chunk = runs[index + 1][0] if index + 1 < len(runs) else len(ch) + 1
+            mapped_samples += (next_chunk - first_chunk) * samples_per_chunk
+            previous = first_chunk
+        if mapped_samples != cnt:
+            raise ValueError("MP4 stsc sample count does not match stsz")
+    elif cnt or ch:
+        raise ValueError("MP4 stsc is missing chunk mappings")
     spc = [0] * len(ch)
     for i, (fc, sp, sd) in enumerate(runs):
         last = runs[i + 1][0] - 1 if i + 1 < len(runs) else len(ch)
         for c in range(fc, last + 1):
-            if 1 <= c <= len(ch):
-                spc[c - 1] = sp
+            spc[c - 1] = sp
     offs = []
     si = 0
     for c in range(len(ch)):

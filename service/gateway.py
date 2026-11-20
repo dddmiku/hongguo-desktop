@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from provider import Provider, ProviderError
+from provider import ACCOUNT_UID_MAX_LENGTH, Provider, ProviderError
 from qr_login import QrLoginError
 
 
@@ -89,7 +89,7 @@ def create_app(provider, token, media_manager=None, signer_ok=lambda: True):
         else:
             message = "播放资源暂时不可用" if error.status_code >= 500 else "请求的资源不存在或参数不正确"
             payload = {"error": {"code": "RESOURCE_UNAVAILABLE" if error.status_code >= 500 else "RESOURCE_NOT_FOUND", "message": message}}
-        return JSONResponse(payload, status_code=error.status_code)
+        return JSONResponse(payload, status_code=error.status_code, headers=error.headers)
 
     @app.exception_handler(Exception)
     async def unknown_error(request, error):
@@ -192,12 +192,13 @@ def create_app(provider, token, media_manager=None, signer_ok=lambda: True):
         return provider.import_session(payload.get("session"))
 
     @app.get("/account/history")
-    def history(cursor: str = Query("", max_length=2048), limit: int = Query(100, ge=1, le=500), refresh: bool = Query(False)):
-        return provider.history(cursor, limit, refresh)
+    def history(cursor: str = Query("", max_length=2048), limit: int = Query(100, ge=1, le=500),
+                refresh: bool = Query(False), expectedUid: str | None = Query(None, min_length=1, max_length=ACCOUNT_UID_MAX_LENGTH)):
+        return provider.history(cursor, limit, refresh, expectedUid)
 
     @app.get("/account/favorites")
-    def favorites():
-        return provider.favorites()
+    def favorites(expectedUid: str | None = Query(None, min_length=1, max_length=ACCOUNT_UID_MAX_LENGTH)):
+        return provider.favorites(expectedUid)
 
     @app.post("/account/progress")
     def progress(payload: dict = Body(...)):

@@ -20,12 +20,13 @@ const Player = lazy(loadPlayer);
 
 type Page = CatalogPage | 'favorites' | 'history' | 'account' | 'settings';
 const defaults: Preferences = { theme: 'dark', quality: 'auto', rate: 1, autoplay: true, volume: .8, cacheGB: 4, closeToTray: true, bossKey: 'Ctrl+Shift+B' };
+const emptyLibrary: Library = { history: [], favorites: [] };
 const nav = [{ id: 'discover', title: '发现', icon: Compass }, { id: 'recommend', title: '为你推荐', icon: Sparkles }, { id: 'rank', title: '排行榜', icon: Trophy }, { id: 'browse', title: '探索片库', icon: Layers3 }];
 
 export default function App() {
   const [page, setPage] = useState<Page>('discover'), [genre, setGenre] = useState<Genre>('short_play');
   const [query, setQuery] = useState('');
-  const [settings, setSettings] = useState<Preferences>(defaults), [library, setLibrary] = useState<Library>({ history: [], favorites: [] });
+  const [settings, setSettings] = useState<Preferences>(defaults), [library, setLibrary] = useState<Library>(emptyLibrary);
   const [booting, setBooting] = useState(true), [bootError, setBootError] = useState(''), [syncing, setSyncing] = useState(false), [toast, setToast] = useState('');
   const [detail, setDetail] = useState<SeriesDetail | null>(null), [detailId, setDetailId] = useState(''), [detailError, setDetailError] = useState(''), [episodeLimit, setEpisodeLimit] = useState(120);
   const [play, setPlay] = useState<{ key:number;detail: SeriesDetail; episode: number; position?: number } | null>(null), [selectedHistory, setSelectedHistory] = useState<HistoryItem | undefined>();
@@ -35,19 +36,56 @@ export default function App() {
   const [drawer, setDrawer] = useState(false);
   const preloadTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined);
   const [session, setSession] = useState<Session | null>(null);
+  const account = useRef({ key: 'local' });
+  const sessionRevision = useRef(0);
   const requests = useRef(0), toggling = useRef(new Set<string>()), latestSettings = useRef(settings), scroll = useRef<HTMLDivElement>(null), search = useRef<HTMLInputElement>(null);
   const retryDetail = useRef<() => void>(undefined);
   const scrollPositions = useRef(new Map<string, number>()), restoringScroll = useRef(false);
   const contentKey = play && playVisible ? `player:${play.detail.series.id}` : `${page}:${page === 'search' ? query : ''}:${genre}`;
   const notify = useCallback((text: string) => setToast(text), []);
-  const refreshLibrary = useCallback(async () => { setLibrary(await window.hongguo.getLibrary()); }, []);
-  const refreshSession = useCallback(async () => { try { setSession(await window.hongguo.request<Session>('/account/session')); } catch { /* Offline libraries remain usable without an account request. */ } }, []);
+  const refreshLibrary = useCallback(async () => {
+    const identity = account.current;
+    const current = await window.hongguo.getLibrary();
+    if (identity === account.current) setLibrary(current);
+  }, []);
+  const applySession = useCallback((value: Session) => {
+    const key = value.loggedIn ? value.uid || 'local' : 'local';
+    setSession(value);
+    if (key === account.current.key) return;
+    account.current = { key };
+    requests.current++;
+    retryDetail.current = undefined;
+    clearTimeout(preloadTimer.current);
+    toggling.current.clear();
+    clearPrivateCatalogs();
+    mediaPreload(window.hongguo).clear();
+    setLibrary(emptyLibrary);
+    setSelectedHistory(undefined);
+    setDetailId('');
+    setDetail(null);
+    setDetailError('');
+    setDrawer(false);
+    setPlay(null);
+    setPlayVisible(false);
+    setSyncing(false);
+    void refreshLibrary().catch(error => notify(message(error)));
+  }, [notify, refreshLibrary]);
+  const refreshSession = useCallback(async () => {
+    const revision = ++sessionRevision.current;
+    try {
+      const current = await window.hongguo.request<Session>('/account/session');
+      if (revision === sessionRevision.current) applySession(current);
+    } catch { /* Offline libraries remain usable without an account request. */ }
+  }, [applySession]);
   useEffect(()=>window.hongguo?.onLibrary(setLibrary),[]);
   useEffect(()=>window.hongguo?.onSettings(setSettings),[]);
-  useEffect(()=>window.hongguo?.onSession(setSession),[]);
+  useEffect(() => window.hongguo?.onSession(value => {
+    sessionRevision.current++;
+    applySession(value);
+  }), [applySession]);
   useEffect(()=>setHistoryRevision(value=>value+1),[library]);
   useEffect(() => { if (window.hongguo) void refreshSession(); }, [refreshSession]);
-  useEffect(() => { clearPrivateCatalogs(); return()=>{clearTimeout(preloadTimer.current);if(window.hongguo)mediaPreload(window.hongguo).clear();}; }, [session?.uid]);
+  useEffect(() => () => { clearTimeout(preloadTimer.current); if (window.hongguo) mediaPreload(window.hongguo).clear(); }, []);
   useEffect(()=>{
     const online=()=>{void window.hongguo?.setOnline?.(navigator.onLine).catch(()=>{});};
     online();window.addEventListener('online',online);window.addEventListener('offline',online);
@@ -58,7 +96,8 @@ export default function App() {
   },[drawer,page,playVisible,session?.loggedIn,session?.uid]);
   const boot = useCallback(async () => {
     setBooting(true); setBootError('');
-    try { const [preferences, local] = await Promise.all([window.hongguo.getSettings(), window.hongguo.getLibrary()]); setSettings(preferences); latestSettings.current = preferences; setLibrary(local); }
+    const identity = account.current;
+    try { const [preferences, local] = await Promise.all([window.hongguo.getSettings(), window.hongguo.getLibrary()]); setSettings(preferences); latestSettings.current = preferences; if (identity === account.current) setLibrary(local); }
     catch (e) { setBootError(message(e)); }
     finally { setBooting(false); }
   }, []);
@@ -74,10 +113,47 @@ export default function App() {
   const playerSeries = useCallback((value:SeriesDetail)=>setPlay(previous=>previous?{...previous,detail:value}:previous),[]);
   const playerSettings = useCallback((patch: Partial<Preferences>) => { void saveSettings(patch).catch(e => notify(message(e))); }, [saveSettings, notify]);
   const closePlayer = useCallback(() => { setPlay(null); setPlayVisible(false); void refreshLibrary().catch(e => notify(message(e))); }, [refreshLibrary, notify]);
-  const sync = useCallback(async () => { if (syncing) return; setSyncing(true); try { const result = await window.hongguo.syncLibrary(); setLibrary(result.library); notify(result.warnings.length ? result.warnings.join('；') : '观看历史与收藏已同步'); } catch (e) { notify(`同步未完成：${message(e)}，本地记录仍可查看`); } finally { setSyncing(false); } }, [notify, syncing]);
-  const afterLogin = useCallback(async () => { await refreshSession(); const result = await window.hongguo.syncLibrary(); setLibrary(result.library); notify(result.warnings.length ? result.warnings.join('；') : '观看历史与收藏已同步'); }, [notify, refreshSession]);
-  const favorite = async (series: Series) => { if (toggling.current.has(series.id)) return; toggling.current.add(series.id); try { setLibrary(await window.hongguo.toggleFavorite(series)); } catch (e) { notify(message(e)); } finally { toggling.current.delete(series.id); } };
-  const removeHistory = async (id: string) => { setLibrary(await window.hongguo.removeHistory(id)); };
+  const sync = useCallback(async () => {
+    if (syncing) return;
+    const identity = account.current;
+    setSyncing(true);
+    try {
+      const result = await window.hongguo.syncLibrary();
+      if (identity !== account.current) return;
+      setLibrary(result.library);
+      notify(result.warnings.length ? result.warnings.join('；') : '观看历史与收藏已同步');
+    } catch (error) {
+      if (identity === account.current) notify(`同步未完成：${message(error)}，本地记录仍可查看`);
+    } finally {
+      if (identity === account.current) setSyncing(false);
+    }
+  }, [notify, syncing]);
+  const afterLogin = useCallback(async () => {
+    await refreshSession();
+    const identity = account.current;
+    const result = await window.hongguo.syncLibrary();
+    if (identity !== account.current) return;
+    setLibrary(result.library);
+    notify(result.warnings.length ? result.warnings.join('；') : '观看历史与收藏已同步');
+  }, [notify, refreshSession]);
+  const favorite = async (series: Series) => {
+    const identity = account.current;
+    if (toggling.current.has(series.id)) return;
+    toggling.current.add(series.id);
+    try {
+      const current = await window.hongguo.toggleFavorite(series);
+      if (identity === account.current) setLibrary(current);
+    } catch (error) {
+      if (identity === account.current) notify(message(error));
+    } finally {
+      if (identity === account.current) toggling.current.delete(series.id);
+    }
+  };
+  const removeHistory = async (id: string) => {
+    const identity = account.current;
+    const current = await window.hongguo.removeHistory(id);
+    if (identity === account.current) setLibrary(current);
+  };
   const closeDetail = useCallback((preservePrepared=false) => {clearTimeout(preloadTimer.current);if(!preservePrepared)mediaPreload(window.hongguo).clear();requests.current++; setDetailId(''); setDetail(null); setDetailError(''); }, []);
   const prepareEpisode=(value:SeriesDetail,index:number,position=0)=>{mediaPreload(window.hongguo).prepare({seriesId:value.series.id,episode:index,quality:latestSettings.current.quality,start:position,duration:value.episodes.find(item=>item.index===index)?.duration});};
   const openDetail = async (series: Series, autoplay = false, progress?: HistoryItem) => {

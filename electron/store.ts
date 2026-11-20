@@ -94,8 +94,7 @@ export class Store {
   private current(uid: string) { return this.data.libraries[uid] ||= {history:[],favorites:[]}; }
   async progress(uid: string, value: PlaybackProgress) {
     if (!/^\d+$/.test(value.series.id) || !Number.isInteger(value.episode) || value.episode < 1 || !Number.isFinite(value.position) || !Number.isFinite(value.duration)) throw new Error('无效的播放进度');
-    const item: HistoryItem = {...value, position:Math.max(0,value.position), duration:Math.max(0,value.duration), watchedAt:Date.now()/1000, uid};
-    const lib = this.current(uid);
+    const item: HistoryItem = {series:value.series, episode:value.episode, position:Math.max(0,value.position), duration:Math.max(0,value.duration), watchedAt:Date.now()/1000, uid};
     this.history.merge(uid,[item],true);
     if(uid!=='local')this.data.outbox[uid+':'+value.series.id]=item;
     await this.persist();
@@ -111,7 +110,16 @@ export class Store {
   async remove(uid:string,id:string) { this.history.remove(uid,id);delete this.data.outbox[uid+':'+id]; await this.persist(); return this.library(uid); }
   async merge(uid:string,history:HistoryItem[],favorites:Series[]|null) {
     const lib=this.current(uid);this.history.merge(uid,history);
-    if (favorites) lib.favorites=[...new Map(favorites.filter(s=>/^\d+$/.test(s.id)).map(s=>[s.id,s])).values()].slice(0,1000);
+    if (favorites) {
+      const previous = new Map(lib.favorites.map(series => [series.id, series]));
+      const merged = new Map<string, Series>();
+      for (const series of favorites) {
+        if (!/^\d+$/.test(series.id)) continue;
+        const actors = series.actors?.length ? series.actors : previous.get(series.id)?.actors ?? [];
+        merged.set(series.id, { ...series, actors });
+      }
+      lib.favorites = [...merged.values()].slice(0, 1000);
+    }
     await this.persist(); return this.library(uid);
   }
   private persist() {

@@ -26,7 +26,8 @@ try{
  await page.getByRole('button',{name:/显示更多集数/}).click();await page.getByRole('button',{name:/显示更多集数/}).click();
  await page.getByRole('dialog').getByRole('button',{name:'播放第 248 集',exact:true}).click();
  await page.waitForFunction(()=>document.querySelector('video[data-active=true]')?.currentTime>19,undefined,{timeout:180000});
- while(true){const sample=await page.evaluate(()=>{
+ const deadline=Date.now()+90000;
+ while(true){if(Date.now()>=deadline)throw new Error('弹幕取样超时');const sample=await page.evaluate(()=>{
    const video=document.querySelector('video[data-active=true]'),canvas=document.querySelector('.danmaku-canvas'),width=canvas.getBoundingClientRect().width;
    const ranges=window.__danmakuRanges.map(r=>({left:Math.max(0,r.left),right:Math.min(width,r.right)})).filter(r=>r.right>r.left).sort((a,b)=>a.left-b.left);
    let edge=0,gap=0;for(const r of ranges){if(edge>0&&r.left>edge)gap=Math.max(gap,r.left-edge);edge=Math.max(edge,r.right);}

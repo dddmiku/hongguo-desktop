@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER = "dddmiku"
@@ -73,14 +74,17 @@ def proxy():
 
 def request(method, url, secret=None, data=None, raw=None, content_type=None):
     headers = {"User-Agent": "hongguo-desktop-publisher", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-    if secret:
-        headers["Authorization"] = "Bearer " + secret
     body = raw if raw is not None else json.dumps(data).encode() if data is not None else None
     if body is not None:
         headers["Content-Type"] = content_type or "application/json"
     route = proxy()
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": route, "https": route} if route else {}))
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    if secret:
+        target = urlsplit(url)
+        if target.scheme != "https" or target.netloc not in ("api.github.com", "uploads.github.com"):
+            raise ValueError("发布凭据仅用于 GitHub API 和资产上传")
+        req.add_unredirected_header("Authorization", "Bearer " + secret)
     attempts = 3 if method == "GET" else 1
     for attempt in range(attempts):
         try:
@@ -177,6 +181,23 @@ def _asset_matches(remote, local):
     return (remote.get("state", "uploaded") == "uploaded"
             and remote.get("size") == local.stat().st_size
             and remote.get("digest") == "sha256:" + hashlib.sha256(local.read_bytes()).hexdigest())
+
+
+def verify_runtime_archive(manifest, archive):
+    """Require the local runtime payload to match its published manifest before release."""
+    expected_digest = manifest.get("sha256")
+    expected_size = manifest.get("size")
+    if not isinstance(expected_digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", expected_digest):
+        raise RuntimeError("运行时清单缺少合法的 SHA-256，停止发布")
+    if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size <= 0:
+        raise RuntimeError("运行时清单缺少合法的文件大小，停止发布")
+    if not archive.is_file():
+        raise RuntimeError("可重建运行时尚未归档")
+    actual_size = archive.stat().st_size
+    if actual_size != expected_size:
+        raise RuntimeError("本地运行时 ZIP 大小与清单不符，停止发布")
+    if hashlib.sha256(archive.read_bytes()).hexdigest().lower() != expected_digest.lower():
+        raise RuntimeError("本地运行时 ZIP 摘要与清单不符，停止发布")
 
 
 def _find_release(repo, tag, secret):
@@ -302,8 +323,8 @@ def publish(secret, legacy=False):
     archive = out / "runtime-win-x64.zip"
     runtime_manifest = json.loads((ROOT / "runtime-manifest.json").read_text(encoding="utf-8"))
     publish_runtime = runtime_manifest["version"] == VERSION
-    if publish_runtime and not archive.is_file():
-        raise RuntimeError("可重建运行时尚未归档")
+    if publish_runtime:
+        verify_runtime_archive(runtime_manifest, archive)
     digest = hashlib.sha256(installer.read_bytes()).hexdigest()
     notes = current_release_notes(ROOT / "docs/release-notes.md", VERSION)
     platforms = {}

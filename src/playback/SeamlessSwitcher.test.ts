@@ -5,7 +5,7 @@ function fixture(){
   const events:string[]=[],requests:{index:number;target:PlaybackTarget;signal:AbortSignal;resolve:(value:PreparedDeck)=>void;reject:(error:Error)=>void}[]=[];
   let painted!:()=>void;
   const controller=new SeamlessSwitcher({prepare:(index,wanted,signal)=>new Promise<PreparedDeck>((resolve,reject)=>requests.push({index,target:wanted,signal,resolve,reject})),present:(next,previous)=>events.push(`present:${next.target.episode}:was:${previous?.target.episode||0}`),afterPresent:()=>new Promise<void>(resolve=>{painted=resolve;})});
-  const resolve=(n:number)=>{const r=requests[n];const deck={index:r.index,target:r.target,release:vi.fn(()=>{events.push(`release:${r.target.episode}`);})};r.resolve(deck);return deck;};
+  const resolve=(n:number)=>{const r=requests[n];const deck={index:r.index,target:r.target,release:vi.fn<() => void | Promise<void>>(()=>{events.push(`release:${r.target.episode}`);})};r.resolve(deck);return deck;};
   return {controller,requests,events,resolve,paint:()=>painted()};
 }
 const tick=async()=>{await Promise.resolve();await Promise.resolve();};
