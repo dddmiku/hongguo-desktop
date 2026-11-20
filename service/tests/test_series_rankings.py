@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from series_rankings import BOARDS, CELL_ID, _entry, read_series_rank
+from series_rankings import BOARDS, CELL_ID, _entry, read_series_rank_page
 
 
 def video(sid="12345678", **fields):
@@ -23,7 +23,7 @@ class SeriesRankingsTests(unittest.TestCase):
         for board, selector in BOARDS.items():
             with self.subTest(board=board):
                 sdk = types.SimpleNamespace(api=Mock(return_value=page([video()])))
-                self.assertEqual(read_series_rank(sdk, board)[0]["series_id"], "12345678")
+                self.assertEqual(read_series_rank_page(sdk, board)["items"][0]["series_id"], "12345678")
                 args, kwargs = sdk.api.call_args
                 self.assertEqual(args, ("GET", "/reading/bookapi/bookmall/cell/change/v"))
                 self.assertTrue(kwargs["signed"])
@@ -53,39 +53,54 @@ class SeriesRankingsTests(unittest.TestCase):
                 self.assertEqual(row["series_id"], "12345678")
                 self.assertEqual(row["episode_cnt"], 207)
 
-    def test_pagination_deduplicates_and_uses_upstream_cursor_and_same_session(self):
-        sdk = types.SimpleNamespace(api=Mock(side_effect=[
-            page([video(), video(), video("invalid")], more=True, offset=10),
-            page([video("23456789")], more=False, offset=20)]))
-        rows = read_series_rank(sdk, "new")
-        self.assertEqual([row["series_id"] for row in rows], ["12345678", "23456789"])
-        first = sdk.api.call_args_list[0].kwargs["extra_query"]
-        second = sdk.api.call_args_list[1].kwargs["extra_query"]
-        self.assertEqual(second["offset"], "10")
-        self.assertEqual(first["session_uuid"], second["session_uuid"])
+    def test_page_filters_invalid_and_duplicate_work_ids(self):
+        sdk = types.SimpleNamespace(api=Mock(return_value=page([video(), video(), video("invalid")], more=True)))
+        result = read_series_rank_page(sdk, "new")
+        self.assertEqual([row["series_id"] for row in result["items"]], ["12345678"])
+        self.assertTrue(result["hasMore"])
+        self.assertEqual(result["continuation"]["offset"], 10)
 
-    def test_repeated_cursor_stops_even_when_has_more(self):
+    def test_page_continuation_reuses_client_uuid_and_updates_server_fields(self):
+        first_response = page([video()], more=True, offset=10)
+        first_response["data"].update(session_id="server-session-one", rank_version=2601)
+        second_response = page([video("23456789")], more=True, offset=20)
+        second_response["data"]["cell_view"].update(session_id="server-session-two", rank_version="2602")
+        sdk = types.SimpleNamespace(api=Mock(side_effect=[first_response, second_response,
+                                                           page([video("34567890")], offset=30)]))
+
+        first = read_series_rank_page(sdk)
+        second = read_series_rank_page(sdk, continuation=first["continuation"])
+        third = read_series_rank_page(sdk, continuation=second["continuation"])
+
+        initial, continued, renewed = [call.kwargs["extra_query"] for call in sdk.api.call_args_list]
+        self.assertNotIn("offset", initial)
+        self.assertNotIn("session_id", initial)
+        self.assertNotIn("rank_version", initial)
+        self.assertEqual(continued, {**initial, "offset": "10", "session_id": "server-session-one", "rank_version": "2601"})
+        self.assertEqual(renewed, {**initial, "offset": "20", "session_id": "server-session-two", "rank_version": "2602"})
+        self.assertEqual(first["continuation"]["session_id"], "server-session-one")
+        self.assertTrue(second["hasMore"])
+        self.assertFalse(third["hasMore"])
+        self.assertEqual(third["warning"], "")
+
+    def test_repeated_offset_reports_incomplete_pagination(self):
         sdk = types.SimpleNamespace(api=Mock(return_value=page([video()], more=True, offset=0)))
-        self.assertEqual(len(read_series_rank(sdk)), 1)
-        self.assertEqual(sdk.api.call_count, 1)
-
-    def test_invalid_rows_with_advancing_cursors_have_a_page_budget(self):
-        responses = [page([None], more=True, offset=(n + 1) * 10) for n in range(30)]
-        sdk = types.SimpleNamespace(api=Mock(side_effect=responses))
-        self.assertEqual(read_series_rank(sdk), [])
-        self.assertEqual(sdk.api.call_count, 10)
+        result = read_series_rank_page(sdk)
+        self.assertEqual(len(result["items"]), 1)
+        self.assertFalse(result["hasMore"])
+        self.assertTrue(result["warning"])
 
     def test_business_failure_or_missing_cells_is_not_an_empty_success(self):
         for response in ({"code": 1, "data": {}}, {"code": 0, "data": {}}, None):
             with self.subTest(response=response):
                 sdk = types.SimpleNamespace(api=Mock(return_value=response))
                 with self.assertRaises(ValueError):
-                    read_series_rank(sdk)
+                    read_series_rank_page(sdk)
 
     def test_unsupported_board_never_calls_upstream(self):
         sdk = types.SimpleNamespace(api=Mock())
         with self.assertRaises(ValueError):
-            read_series_rank(sdk, "hot")
+            read_series_rank_page(sdk, "hot")
         sdk.api.assert_not_called()
 
 

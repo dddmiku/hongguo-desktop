@@ -8,7 +8,7 @@ describe('公开片单缓存', () => {
   it('重启后可读取公开片单且不会保存账号秘密', async () => { const cache = await import('./catalog-cache'); cache.writeCatalog('/catalog/home?mode=discover', { ...data, token: 'credential', cookie: 'private' } as CatalogResult); expect([...storage.values()].join('')).not.toMatch(/credential|private/); vi.resetModules(); const restarted = await import('./catalog-cache'); expect(restarted.readCatalog('/catalog/home?mode=discover')?.items).toHaveLength(1); });
   it('推荐与搜索只保留在内存，换号可清理', async () => { const cache = await import('./catalog-cache'); cache.writeCatalog('/catalog/home?mode=recommend#uid-a', data); cache.writeCatalog('/catalog/search?q=test', data); expect([...storage.values()].join('')).not.toContain('测试剧'); cache.clearPrivateCatalogs(); expect(cache.readCatalog('/catalog/home?mode=recommend#uid-a')).toBeNull(); });
   it('失败或空数据不覆盖已有可用片单', async () => { const cache = await import('./catalog-cache'); cache.writeCatalog('/catalog/home?mode=discover', data); cache.writeCatalog('/catalog/home?mode=discover', { items: [] }); expect(cache.readCatalog('/catalog/home?mode=discover')?.items).toHaveLength(1); });
-  it('存储损坏时仍允许下一次网络结果写入', async () => { storage.set('hongguo:public-catalog-v1', 'broken'); const cache = await import('./catalog-cache'); expect(cache.readCatalog('/catalog/home?mode=discover')).toBeNull(); cache.writeCatalog('/catalog/home?mode=discover', data); expect(cache.readCatalog('/catalog/home?mode=discover')?.items).toHaveLength(1); });
+  it('存储损坏时仍允许下一次网络结果写入', async () => { storage.set('hongguo:public-catalog-v2', 'broken'); const cache = await import('./catalog-cache'); expect(cache.readCatalog('/catalog/home?mode=discover')).toBeNull(); cache.writeCatalog('/catalog/home?mode=discover', data); expect(cache.readCatalog('/catalog/home?mode=discover')?.items).toHaveLength(1); });
   it('缓存有数量上限', async () => { const cache = await import('./catalog-cache'); for (let n = 0; n < 30; n++) cache.writeCatalog(`/catalog/rank?board=${n}`, data); expect(JSON.parse([...storage.values()][0])).toHaveLength(12); });
   it('公开筛选面板可单独缓存并在重启后完整保留多维分类', async () => {
     let cache = await import('./catalog-cache');
@@ -23,5 +23,48 @@ describe('公开片单缓存', () => {
     expect(cache.readCatalog('/catalog/browse?theme=cate_5000')?.items[0].title).toBe('爱情');
     expect(cache.readCatalog('/catalog/browse?theme=cate_5000&cursor=next')?.items[0].title).toBe('爱情第二页');
     expect(cache.readCatalog('/catalog/browse?setting=cate_5221&background=cate_5338')?.items[0].title).toBe('女强现代');
+  });
+  it('超过160部的合并片单在内存保持完整，不能把截断片单和末页游标落盘', async () => {
+    let cache = await import('./catalog-cache');
+    const key = '/catalog/rank?board=recommend&genre=series';
+    const items = Array.from({ length: 200 }, (_, index) => ({ ...data.items[0], id: String(12345678 + index) }));
+    cache.writeCatalog(key, { items: items.slice(0, 160), hasMore: true, cursor: 'after-160' });
+    cache.writeCatalog(key, { items, hasMore: true, cursor: 'after-200' });
+    const restored = cache.readCatalog(key)!;
+    expect(restored.items.map(item => item.id)).toEqual(items.map(item => item.id));
+    expect(restored.cursor).toBe('after-200');
+    expect(restored.hasMore).toBe(true);
+    expect(JSON.parse([...storage.values()].at(-1)!).some((row: { key: string }) => row.key === key)).toBe(false);
+    vi.resetModules(); cache = await import('./catalog-cache');
+    expect(cache.readCatalog(key)).toBeNull();
+  });
+  it('恰好160部的完整分页前缀及匹配游标可以在重启后恢复', async () => {
+    let cache = await import('./catalog-cache');
+    const key = '/catalog/rank?board=new&genre=series';
+    const items = Array.from({ length: 160 }, (_, index) => ({ ...data.items[0], id: String(22345678 + index) }));
+    cache.writeCatalog(key, { items, hasMore: true, cursor: 'after-160' });
+    vi.resetModules(); cache = await import('./catalog-cache');
+    expect(cache.readCatalog(key)).toMatchObject({ items, hasMore: true, cursor: 'after-160' });
+  });
+  it('片单超过内存容量时整条退出缓存，不能继续恢复过期前缀或游标', async () => {
+    let cache = await import('./catalog-cache');
+    const key = '/catalog/rank?board=recommend&genre=series';
+    cache.writeCatalog(key, { ...data, hasMore: true, cursor: 'after-1' });
+    cache.writeCatalog(key, { items: Array.from({ length: 1001 }, (_, index) => ({ ...data.items[0], id: String(32345678 + index) })), hasMore: true, cursor: 'after-1001' });
+    expect(cache.readCatalog(key)).toBeNull();
+    vi.resetModules(); cache = await import('./catalog-cache');
+    expect(cache.readCatalog(key)).toBeNull();
+  });
+  it('不恢复旧版可能已截断但保留后续游标的片单', async () => {
+    const key = '/catalog/rank?board=recommend&genre=series';
+    storage.set('hongguo:public-catalog-v1', JSON.stringify([{ key, at: Date.now(), data: { ...data, hasMore: true, cursor: 'after-200' } }]));
+    const cache = await import('./catalog-cache');
+    expect(cache.readCatalog(key)).toBeNull();
+  });
+  it('磁盘条目超过容量时整条忽略，不截断其分页前缀', async () => {
+    const key = '/catalog/rank?board=recommend&genre=series';
+    storage.set('hongguo:public-catalog-v2', JSON.stringify([{ key, at: Date.now(), data: { items: Array.from({ length: 200 }, (_, index) => ({ ...data.items[0], id: String(42345678 + index) })), hasMore: true, cursor: 'after-200' } }]));
+    const cache = await import('./catalog-cache');
+    expect(cache.readCatalog(key)).toBeNull();
   });
 });

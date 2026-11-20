@@ -39,42 +39,46 @@ def _entry(video):
             "score": video.get("score", "") if target == current else ""}
 
 
-def read_series_rank(sdk, board="recommend", limit=50):
+def read_series_rank_page(sdk, board="recommend", continuation=None):
+    """Read one complete official page and preserve its ranking session."""
     if board not in BOARDS:
         raise ValueError("Unsupported series ranking")
-    limit = max(1, min(100, int(limit)))
-    rows, seen, offset = [], set(), 0
-    session = str(uuid.uuid4())
-    # The official page currently contains ten cells. A bounded allowance for
-    # invalid/duplicate cells prevents an upstream has_more loop from hanging.
-    for _ in range(min(20, (limit + 9) // 10 + 5)):
-        query = {"cell_id": CELL_ID, "tab_type": "26", "client_req_type": "2",
-                 "client_template": "2", "screen_width_px": "1350", "selected_items": "series_album",
-                 "sub_selected_items": BOARDS[board], "session_uuid": session}
-        if offset:
-            query["offset"] = str(offset)
-        response = sdk.api("GET", "/reading/bookapi/bookmall/cell/change/v", extra_query=query, signed=True)
-        data = response.get("data") if isinstance(response, dict) else None
-        view = data.get("cell_view") if isinstance(data, dict) else None
-        cells = view.get("cell_data") if isinstance(view, dict) else None
-        if not isinstance(response, dict) or response.get("code") not in (0, "0") or not isinstance(cells, list):
-            raise ValueError("Series ranking response is incomplete")
-        for cell in cells:
-            videos = cell.get("video_data") if isinstance(cell, dict) else None
-            video = videos[0] if isinstance(videos, list) and videos else videos
-            item = _entry(video)
-            if item is not None and item["series_id"] not in seen:
-                seen.add(item["series_id"])
-                rows.append(item)
-                if len(rows) == limit:
-                    return rows
-        if not cells or not view.get("has_more", data.get("has_more", False)):
-            break
-        next_offset = view.get("next_offset", data.get("next_offset", offset + len(cells)))
-        if isinstance(next_offset, bool) or not str(next_offset).isdigit():
-            break
-        next_offset = int(next_offset)
-        if next_offset <= offset or next_offset > 100000:
-            break
-        offset = next_offset
-    return rows
+    state = continuation or {"offset": 0, "session_uuid": str(uuid.uuid4())}
+    offset = state["offset"]
+    query = {"cell_id": CELL_ID, "tab_type": "26", "client_req_type": "2",
+             "client_template": "2", "screen_width_px": "1350", "selected_items": "series_album",
+             "sub_selected_items": BOARDS[board], "session_uuid": state["session_uuid"]}
+    if offset:
+        query["offset"] = str(offset)
+    for name in ("session_id", "rank_version"):
+        if state.get(name):
+            query[name] = state[name]
+    response = sdk.api("GET", "/reading/bookapi/bookmall/cell/change/v", extra_query=query, signed=True)
+    data = response.get("data") if isinstance(response, dict) else None
+    view = data.get("cell_view") if isinstance(data, dict) else None
+    cells = view.get("cell_data") if isinstance(view, dict) else None
+    if not isinstance(response, dict) or response.get("code") not in (0, "0") or not isinstance(cells, list):
+        raise ValueError("Series ranking response is incomplete")
+    rows, seen = [], set()
+    for cell in cells:
+        videos = cell.get("video_data") if isinstance(cell, dict) else None
+        video = videos[0] if isinstance(videos, list) and videos else videos
+        item = _entry(video)
+        if item is not None and item["series_id"] not in seen:
+            seen.add(item["series_id"])
+            rows.append(item)
+    more = view.get("has_more", data.get("has_more", False)) in (True, 1, "1", "true")
+    next_offset = view.get("next_offset", data.get("next_offset", offset + len(cells)))
+    valid_offset = re.fullmatch(r"[0-9]{1,6}", str(next_offset)) is not None
+    next_offset = int(next_offset) if valid_offset else offset
+    has_more = bool(cells) and more and offset < next_offset <= 100000
+    next_state = {**state, "offset": next_offset}
+    # session_uuid is the client's request identity. session_id is a distinct
+    # server-issued continuation: omitting it repeats the recommendation tail.
+    for name in ("session_id", "rank_version"):
+        value = data.get(name) or view.get(name) or state.get(name) or ""
+        if not isinstance(value, (str, int)) or isinstance(value, bool) or len(str(value)) > 1024:
+            raise ValueError("Series ranking continuation is invalid")
+        next_state[name] = str(value)
+    return {"items": rows, "hasMore": has_more, "continuation": next_state,
+            "warning": "榜单分页暂时异常，已保留片单，请刷新重试" if more and not has_more else ""}

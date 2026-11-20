@@ -6,7 +6,8 @@ export type CatalogFilters = { themes?: string[]; themeOptions?: CatalogFilterOp
 export interface CatalogResult { items: Series[]; hasMore?: boolean; cursor?: string; filters?: CatalogFilters; cached?: boolean; stale?: boolean; updating?: boolean; updatedAt?: number; warning?: string; }
 interface Entry { at: number; data: CatalogResult; }
 const memory = new Map<string, Entry>();
-const STORAGE = 'hongguo:public-catalog-v1', MAX_ENTRIES = 12, MAX_AGE = 7 * 86400 * 1000;
+const STORAGE = 'hongguo:public-catalog-v2', MAX_ENTRIES = 12, MAX_AGE = 7 * 86400 * 1000;
+const MAX_MEMORY_ITEMS = 1000, MAX_DISK_ITEMS = 160;
 let loaded = false;
 const persistable = (key: string) => !key.includes('mode=recommend') && !key.startsWith('/catalog/search');
 
@@ -20,7 +21,7 @@ function clean(data: CatalogResult): CatalogResult {
   const options = (rows: unknown) => Array.isArray(rows) ? rows.slice(0, 160).filter(row => row && typeof row.id === 'string' && typeof row.name === 'string').map(row => ({ id: row.id.slice(0, 80), name: row.name.slice(0, 80) })) : [];
   const groups = (rows: CatalogFilterGroup[] = []) => rows.slice(0, 20).filter(f => typeof f.type === 'string').map(f => ({ type: f.type.slice(0, 80), name: typeof f.name === 'string' ? f.name.slice(0, 80) : undefined, items: options(f.items) }));
   const filters: CatalogFilters | undefined = data.filters ? Array.isArray(data.filters) ? groups(data.filters) : { themeOptions: options(data.filters.themeOptions), themes: Array.isArray(data.filters.themes) ? data.filters.themes.filter(s => typeof s === 'string').slice(0, 80).map(s => s.slice(0, 80)) : [], groups: groups(data.filters.groups) } : undefined;
-  return { items: (data.items || []).slice(0, 160).map(series).filter((item): item is Series => !!item), hasMore: !!data.hasMore, cursor: typeof data.cursor === 'string' ? data.cursor.slice(0, 1024) : '', filters, updatedAt: data.updatedAt };
+  return { items: (data.items || []).map(series).filter((item): item is Series => !!item), hasMore: !!data.hasMore, cursor: typeof data.cursor === 'string' ? data.cursor.slice(0, 1024) : '', filters, updatedAt: data.updatedAt };
 }
 function load() {
   if (loaded) return; loaded = true;
@@ -28,7 +29,7 @@ function load() {
     const raw = localStorage.getItem(STORAGE); if (!raw || raw.length > 700000) return;
     const rows = JSON.parse(raw);
     if (!Array.isArray(rows)) return;
-    for (const row of rows.slice(0, MAX_ENTRIES)) if (typeof row?.key === 'string' && persistable(row.key) && typeof row.at === 'number' && Date.now() - row.at < MAX_AGE && Array.isArray(row.data?.items)) memory.set(row.key, { at: row.at, data: clean(row.data) });
+    for (const row of rows.slice(0, MAX_ENTRIES)) if (typeof row?.key === 'string' && persistable(row.key) && typeof row.at === 'number' && Date.now() - row.at < MAX_AGE && Array.isArray(row.data?.items) && row.data.items.length <= MAX_DISK_ITEMS) memory.set(row.key, { at: row.at, data: clean(row.data) });
   } catch { /* A damaged cache must never prevent browsing. */ }
 }
 function prune() {
@@ -42,7 +43,11 @@ export function readCatalog(key: string): CatalogResult | null {
 }
 export function writeCatalog(key: string, data: CatalogResult) {
   load(); if (!Array.isArray(data.items) || !data.items.length && !data.filters) return;
-  const safe = clean(data); memory.set(key, { at: Date.now(), data: safe }); prune();
-  try { localStorage.setItem(STORAGE, JSON.stringify([...memory.entries()].filter(([key]) => persistable(key)).map(([key, entry]) => ({ key, ...entry })))); } catch { /* Memory cache still serves navigation when disk storage is unavailable. */ }
+  // A cursor belongs to the entire loaded prefix. Never cache a truncated
+  // prefix with a later cursor: restoring it would permanently skip results.
+  if (data.items.length > MAX_MEMORY_ITEMS) memory.delete(key);
+  else { const safe = clean(data); memory.set(key, { at: Date.now(), data: safe }); }
+  prune();
+  try { localStorage.setItem(STORAGE, JSON.stringify([...memory.entries()].filter(([key, entry]) => persistable(key) && entry.data.items.length <= MAX_DISK_ITEMS).map(([key, entry]) => ({ key, ...entry })))); } catch { /* Memory cache still serves navigation when disk storage is unavailable. */ }
 }
 export function clearPrivateCatalogs() { for (const key of memory.keys()) if (!persistable(key)) memory.delete(key); }

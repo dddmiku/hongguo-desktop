@@ -224,6 +224,153 @@ class ProviderTests(unittest.TestCase):
                 self.assertEqual(response.json()["items"][0]["id"], expected)
         self.assertEqual(self.sdk.api.call_count, 2)
 
+    def test_series_ranking_exposes_continuation_instead_of_ending_at_first_screen(self):
+        self.sdk.api = Mock(side_effect=[self.ranking_page(
+            *(12345678 + index for index in range(start, start + 16)),
+            more=start < 64, next_offset=start + 16) for start in range(0, 80, 16)])
+        first = self.provider.rank("recommend", "series")
+        self.assertTrue(first.get("hasMore"), "官方仍有后续系列时必须展示加载更多入口")
+        self.assertTrue(first.get("cursor"))
+        self.assertEqual(len(first["items"]), 16)
+        self.assertEqual(self.sdk.api.call_count, 1)
+
+    @staticmethod
+    def ranking_page(*ids, more=False, next_offset=0, **continuation):
+        return {"code": 0, "data": {**continuation, "cell_view": {
+            "cell_data": [{"video_data": [{"series_id": str(sid), "title": "测试系列"}]} for sid in ids],
+            "has_more": more, "next_offset": next_offset}}}
+
+    def test_series_ranking_route_loads_distinct_pages_until_the_upstream_end(self):
+        page = self.ranking_page
+        self.sdk.api = Mock(side_effect=[
+            page(12345678, 23456789, more=True, next_offset=10,
+                 session_id="fixture-server-session", rank_version=42),
+            page(23456789, 34567890, 34567890, more=True, next_offset=20),
+            page(12345678, 45678901, next_offset=30),
+        ])
+        with TestClient(create_app(self.provider, "a" * 64)) as client:
+            headers = {"Authorization": "Bearer " + "a" * 64}
+            params = {"genre": "series", "board": "recommend"}
+            ids, cursor = [], ""
+            for expected, more in [(2, True), (1, True), (1, False)]:
+                result = client.get("/catalog/rank", params={**params, "cursor": cursor}, headers=headers)
+                self.assertEqual(result.status_code, 200)
+                body = result.json()
+                self.assertEqual(len(body["items"]), expected)
+                self.assertEqual(body["hasMore"], more)
+                self.assertEqual(bool(body["cursor"]), more)
+                self.assertNotIn("warning", body)
+                if more:
+                    self.assertNotEqual(body["cursor"], cursor)
+                cursor = body["cursor"]
+                ids.extend(item["id"] for item in body["items"])
+        self.assertEqual(ids, ["12345678", "23456789", "34567890", "45678901"])
+        first, second, third = [call.kwargs["extra_query"] for call in self.sdk.api.call_args_list]
+        self.assertEqual(second, {**first, "offset": "10", "session_id": "fixture-server-session", "rank_version": "42"})
+        self.assertEqual(third, {**second, "offset": "20"})
+
+    def test_series_ranking_route_rejects_cross_board_and_forged_cursors(self):
+        self.sdk.api = Mock(return_value=self.ranking_page(12345678, more=True, next_offset=10))
+        with TestClient(create_app(self.provider, "a" * 64)) as client:
+            headers = {"Authorization": "Bearer " + "a" * 64}
+            params = {"genre": "series", "board": "recommend"}
+            first = client.get("/catalog/rank", params=params, headers=headers)
+            self.assertEqual(first.status_code, 200)
+            cursor = first.json()["cursor"]
+            self.assertTrue(cursor)
+            for board, invalid in (("new", cursor), ("recommend", cursor + "tampered")):
+                with self.subTest(board=board):
+                    response = client.get("/catalog/rank",
+                        params={**params, "board": board, "cursor": invalid}, headers=headers)
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(response.json()["error"]["code"], "CURSOR_EXPIRED")
+        self.sdk.api.assert_called_once()
+
+    def test_series_ranking_failed_followup_can_retry_the_same_cursor(self):
+        page = self.ranking_page
+        self.sdk.api = Mock(side_effect=[
+            page(12345678, more=True, next_offset=10, session_id="fixture-server-session", rank_version=42),
+            RuntimeError("fixture upstream failure"), page(12345678, 23456789, next_offset=20),
+        ])
+        with TestClient(create_app(self.provider, "a" * 64)) as client:
+            headers = {"Authorization": "Bearer " + "a" * 64}
+            params = {"genre": "series", "board": "recommend"}
+            first = client.get("/catalog/rank", params=params, headers=headers)
+            self.assertEqual(first.status_code, 200)
+            cursor = first.json()["cursor"]
+            self.assertTrue(cursor)
+            continued = {**params, "cursor": cursor}
+            failed = client.get("/catalog/rank", params=continued, headers=headers)
+            self.assertEqual(failed.status_code, 502)
+            self.assertEqual(failed.json()["error"]["code"], "UPSTREAM_UNAVAILABLE")
+            retried = client.get("/catalog/rank", params=continued, headers=headers)
+            self.assertEqual(retried.status_code, 200)
+            self.assertEqual([entry["id"] for entry in retried.json()["items"]], ["23456789"])
+            self.assertFalse(retried.json()["hasMore"])
+        self.assertEqual(self.sdk.api.call_args_list[1], self.sdk.api.call_args_list[2])
+
+    def test_series_ranking_refresh_replaces_first_page_and_creates_a_new_session(self):
+        page = self.ranking_page
+        self.sdk.api = Mock(side_effect=[
+            page(12345678, more=True, next_offset=10, session_id="fixture-old-session", rank_version=42),
+            page(23456789, more=True, next_offset=10, session_id="fixture-new-session", rank_version=43),
+            page(34567890, next_offset=20),
+        ])
+        with TestClient(create_app(self.provider, "a" * 64)) as client:
+            headers = {"Authorization": "Bearer " + "a" * 64}
+            params = {"genre": "series", "board": "recommend"}
+            first = client.get("/catalog/rank", params=params, headers=headers).json()
+            self.assertEqual(client.get("/catalog/rank", params=params, headers=headers).json(), first)
+            fresh = client.get("/catalog/rank", params={**params, "refresh": "true"}, headers=headers).json()
+            self.assertEqual([item["id"] for item in fresh["items"]], ["23456789"])
+            self.assertNotEqual(first["cursor"], fresh["cursor"])
+            self.assertEqual(client.get("/catalog/rank", params=params, headers=headers).json(), fresh)
+            continued = client.get("/catalog/rank", params={**params, "cursor": fresh["cursor"]}, headers=headers)
+            self.assertEqual(continued.status_code, 200)
+        old, new, continued = [call.kwargs["extra_query"] for call in self.sdk.api.call_args_list]
+        self.assertNotEqual(old["session_uuid"], new["session_uuid"])
+        for name in ("session_id", "rank_version", "offset"):
+            self.assertNotIn(name, new)
+        self.assertEqual(continued, {**new, "offset": "10", "session_id": "fixture-new-session", "rank_version": "43"})
+
+    def test_series_ranking_skips_at_most_three_pages_without_new_works(self):
+        page = self.ranking_page
+        self.sdk.api = Mock(side_effect=[
+            page(12345678, more=True, next_offset=10),
+            page("invalid", more=True, next_offset=20),
+            page(12345678, more=True, next_offset=30),
+            page(12345678, more=True, next_offset=40),
+        ])
+        first = self.provider.rank("recommend", "series")
+        result = self.provider.rank("recommend", "series", first["cursor"])
+        self.assertEqual(result["items"], [])
+        self.assertFalse(result["hasMore"])
+        self.assertEqual(result["cursor"], "")
+        self.assertIn("已保留片单", result["warning"])
+        self.assertEqual([call.kwargs["extra_query"].get("offset") for call in self.sdk.api.call_args_list],
+                         [None, "10", "20", "30"])
+
+    def test_non_series_rank_routes_preserve_one_shot_responses_and_refresh(self):
+        self.sdk.api = Mock()
+        self.sdk.rank = Mock(return_value=[{"series_id": "23456789", "title": "测试漫剧"}])
+        with TestClient(create_app(self.provider, "a" * 64)) as client:
+            headers = {"Authorization": "Bearer " + "a" * 64}
+            for genre, expected in (("short_play", "12345678"), ("ai_series", "12345678"),
+                                    ("comic_series", "23456789")):
+                with self.subTest(genre=genre):
+                    params = {"genre": genre, "board": "new"}
+                    first = client.get("/catalog/rank", params=params, headers=headers)
+                    self.assertEqual(first.status_code, 200)
+                    self.assertEqual(set(first.json()), {"items"})
+                    self.assertEqual(first.json()["items"][0]["id"], expected)
+                    self.assertEqual(client.get("/catalog/rank", params=params, headers=headers).json(), first.json())
+                    refreshed = client.get("/catalog/rank", params={**params, "refresh": "true"}, headers=headers)
+                    self.assertEqual(refreshed.json(), first.json())
+        self.sdk.api.assert_not_called()
+        self.assertEqual(self.sdk.browse.call_count, 4)
+        self.assertEqual(self.sdk.rank.call_count, 2)
+        self.sdk.rank.assert_called_with("new", limit=50)
+
     def test_browse_filters_are_normalized_for_renderer(self):
         result = self.provider.browse("short_play")
         self.assertEqual(result["filters"]["themes"], ["剧情"])

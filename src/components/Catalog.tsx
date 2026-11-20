@@ -66,7 +66,7 @@ export default function Catalog({ page, query, genre, accountKey, favorites, his
     const slowTimer = setTimeout(() => { if (id === generation.current) setSlow(true); }, 6000);
     const request = async (refresh = false) => {
       try {
-        const data = await window.hongguo.request<CatalogResult>(path + (refresh && (page === 'discover' || page === 'recommend' || page === 'search') ? '&refresh=true' : ''));
+        const data = await window.hongguo.request<CatalogResult>(path + (refresh && (page === 'discover' || page === 'recommend' || page === 'search' || page === 'rank') ? '&refresh=true' : ''));
         if (id !== generation.current) return;
         apply(data); writeCatalog(cacheKey, data); setError(data.warning || '');
         if (first) { first = false; requestAnimationFrame(() => ready.current?.()); }

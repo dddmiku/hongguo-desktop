@@ -33,7 +33,7 @@ from seasons import SeasonResolver
 from search import SearchRows, rank_results, search_series
 from web_search import OfficialWebSearch
 from qr_login import QrLoginManager, QrLoginError
-from series_rankings import read_series_rank
+from series_rankings import read_series_rank_page
 
 
 GENRES = {"short_play", "comic_series", "ai_series"}
@@ -572,18 +572,64 @@ class Provider:
                     **({'warning': '部分搜索结果暂未补齐'} if not getattr(rows, 'complete', True) else {})}
         return self.cache.get(('suggestions', query), 30, load, cacheable=lambda result: 'warning' not in result)
 
-    def rank(self, board="hot", genre="short_play"):
+    def rank(self, board="hot", genre="short_play", cursor="", refresh=False):
         if genre != "series":
             self._genre(genre)
         if board not in ({"recommend", "new"} if genre == "series" else {"hot", "new", "recommend"}):
             raise ProviderError("INPUT_INVALID", "榜单不正确", 400)
+        if not isinstance(cursor, str) or len(cursor) > 80:
+            raise ProviderError("INPUT_INVALID", "榜单分页不正确", 400)
+        if genre == "series":
+            return self._series_rank_page(board, cursor, refresh)
+        if cursor:
+            raise ProviderError("INPUT_INVALID", "这项榜单暂不支持分页", 400)
         def read():
-            if genre == "series":
-                return self._list(read_series_rank(self.sdk, board, limit=50))
             rows = self.sdk.rank(board, limit=50) if genre == "comic_series" else self.sdk.browse(
                     genre, sort="online_time" if board == "new" else "hot_score", max_items=50)
             return self._list(rows)
-        return {"items": self.cache.get(("rank", board, genre), 120, lambda: self._read("读取排行榜", read))}
+        key = ("rank", board, genre)
+        if refresh:
+            self.cache.invalidate(key)
+        return {"items": self.cache.get(key, 120, lambda: self._read("读取排行榜", read))}
+
+    def _series_rank_page(self, board, cursor, refresh):
+        key = ("series-rank-page", board, cursor)
+        if refresh:
+            self.cache.invalidate(key)
+        def load():
+            old = None
+            if cursor:
+                old = self.cache.get(("series-rank-cursor", cursor), 900, lambda: None)
+                if not old or old["board"] != board:
+                    raise ProviderError("CURSOR_EXPIRED", "榜单已更新，请刷新后继续", 400)
+            seen = set(old["seen"]) if old else set()
+            continuation = old["continuation"] if old else None
+            items, warning, has_more = [], "", False
+            # Skip a bounded run of duplicate/invalid cells without falsely
+            # declaring the ranking complete or hanging on a broken upstream.
+            for _ in range(3):
+                response = self._read("读取排行榜", lambda: read_series_rank_page(self.sdk, board, continuation))
+                items = [item for item in self._list(response["items"]) if item["id"] not in seen]
+                has_more, continuation = response["hasMore"], response["continuation"]
+                warning = response["warning"]
+                if items or not has_more:
+                    break
+            if has_more and not items:
+                has_more = False
+                warning = "榜单服务重复返回已有作品，已保留片单，请刷新重试"
+            next_cursor = ""
+            if has_more:
+                seen.update(item["id"] for item in items)
+                if len(seen) > 5000:
+                    has_more = False
+                    warning = "本次浏览作品较多，请刷新榜单继续查看"
+                else:
+                    next_cursor = secrets.token_hex(12)
+                    state = {"board": board, "seen": list(seen), "continuation": continuation}
+                    self.cache.get(("series-rank-cursor", next_cursor), 900, lambda: state)
+            return {"items": items, "hasMore": has_more, "cursor": next_cursor,
+                    **({"warning": warning} if warning else {})}
+        return self.cache.get(key, 120, load, cacheable=lambda result: "warning" not in result)
 
     def filters(self, genre="short_play"):
         self._genre(genre)

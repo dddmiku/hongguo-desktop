@@ -115,8 +115,9 @@ def create_app(provider, token, media_manager=None, signer_ok=lambda: True):
         return provider.search_suggestions(query)
 
     @app.get("/catalog/rank")
-    def rank(board: str = Query("hot", max_length=32), genre: str = Query("short_play", max_length=32)):
-        return provider.rank(board, genre)
+    def rank(board: str = Query("hot", max_length=32), genre: str = Query("short_play", max_length=32),
+             cursor: str = Query("", max_length=80), refresh: bool = Query(False)):
+        return provider.rank(board, genre, cursor, refresh=refresh)
 
     @app.get("/catalog/browse")
     def browse(genre: str = Query("short_play", max_length=32), sort: str = Query("hot_score", max_length=32),

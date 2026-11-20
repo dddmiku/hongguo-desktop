@@ -9,6 +9,7 @@ await mkdir(out,{recursive:true});
 const env={...process.env,HG_TEST_DATA_DIR:path.join(out,'profile'),HG_TEST_BACKGROUND:'1',TEMP:out,TMP:out};
 delete env.ELECTRON_RUN_AS_NODE;
 const checks=[],errors=[],boards={};let instance,page,stage='启动隔离客户端';
+const allPages=process.argv.includes('--all-pages');
 const check=(name,ok,detail)=>{checks.push({name,ok,...(detail===undefined?{}:{detail})});console.log(JSON.stringify(checks.at(-1)));if(!ok)throw new Error(name);};
 const route=board=>'/catalog/rank?board='+board+'&genre=series';
 const validCover=value=>{try{return ['http:','https:'].includes(new URL(value).protocol);}catch{return false;}};
@@ -50,13 +51,37 @@ const verifyBoard=async(board,label)=>{
   await page.screenshot({path:path.join(out,board+'.png'),animations:'disabled'});
   return data;
 };
+const verifyPagination=async(board,label,first)=>{
+  stage='核对'+label+'真实后续页';
+  let expected=first,loaded=first.items.slice(),pageCount=1;
+  const more=()=>page.getByRole('button',{name:'加载更多故事',exact:true});
+  while(expected.hasMore&&(allPages||pageCount<4)){
+    check(label+'后续页提供有效游标',typeof expected.cursor==='string'&&expected.cursor.length>0);
+    const next=await page.evaluate(route=>window.hongguo.request(route,{timeout:90000}),route(board)+'&cursor='+encodeURIComponent(expected.cursor));
+    check(label+'第'+(pageCount+1)+'页确实提供新增作品',next.items.length>0&&next.items.every(row=>!loaded.some(old=>old.id===row.id)),{items:next.items.length});
+    await more().click();
+    loaded=[...loaded,...next.items];expected=next;pageCount++;
+    await matchBoard({items:loaded});
+    const ranks=await page.locator('.catalog-page .rank-number').allTextContents();
+    check(label+'第'+pageCount+'页保留已有作品且名次连续',new Set(loaded.map(row=>row.id)).size===loaded.length&&ranks.length===loaded.length&&ranks.every((rank,index)=>rank===String(index+1).padStart(2,'0')),{loaded:loaded.length});
+    if(pageCount>=200)throw new Error('官方分页超过验收预算');
+  }
+  check(label+'分页按钮与实际官方末页一致',await more().count()===(expected.hasMore?1:0),{pages:pageCount,loaded:loaded.length,complete:!expected.hasMore});
+  boards[board].pagination={pages:pageCount,loaded:loaded.length,complete:!expected.hasMore};
+  stage='刷新'+label+'恢复首屏';
+  await page.getByRole('button',{name:'刷新',exact:true}).click();
+  // Refresh creates a new official ranking session; obtain the new first page.
+  await page.waitForFunction(()=>!document.querySelector('.refresh-button')?.disabled,undefined,{timeout:90000});
+  const refreshed=await getBoard(board);await matchBoard(refreshed);
+  return refreshed;
+};
 
 try{
   instance=await electron.launch({...(packaged?{executablePath:process.env.HG_QA_PACKAGED_PATH||path.join(root,'release','win-unpacked','红果桌面.exe'),args:[]}:{args:['.'],cwd:root}),env,timeout:60000});
   page=await instance.firstWindow();page.on('pageerror',error=>errors.push(error.name));
   await page.waitForSelector('.app-shell',{timeout:30000});
   // Only reset public preferences and cache inside this script's own profile.
-  await page.evaluate(()=>{localStorage.removeItem('hongguo:catalog-selection-v1');localStorage.removeItem('hongguo:public-catalog-v1');});
+  await page.evaluate(()=>{localStorage.removeItem('hongguo:catalog-selection-v1');localStorage.removeItem('hongguo:public-catalog-v1');localStorage.removeItem('hongguo:public-catalog-v2');});
   await page.reload();await page.waitForSelector('.app-shell',{timeout:30000});
   const profile=await instance.evaluate(({app})=>app.getPath('userData'));
   const session=await page.evaluate(()=>window.hongguo.request('/account/session'));
@@ -69,8 +94,8 @@ try{
   await page.getByRole('button',{name:'排行榜',exact:true}).click();
   await page.getByRole('tab',{name:'系列剧',exact:true}).click();
   check('系列剧模式显示独立标题和子榜单',await page.getByRole('heading',{name:'系列剧排行榜',exact:true}).count()===1&&await page.getByRole('button',{name:'推荐榜',exact:true}).getAttribute('aria-pressed')==='true');
-  const recommended=await verifyBoard('recommend','推荐榜');
-  const latest=await verifyBoard('new','新季榜');
+  const recommended=await verifyPagination('recommend','推荐榜',await verifyBoard('recommend','推荐榜'));
+  const latest=await verifyPagination('new','新季榜',await verifyBoard('new','新季榜'));
   stage='快速切榜后核对结果';
   await page.getByRole('button',{name:'推荐榜',exact:true}).click();await page.getByRole('button',{name:'新季榜',exact:true}).click();
   await matchBoard(latest);
