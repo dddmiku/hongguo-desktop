@@ -1304,8 +1304,6 @@ class Provider:
             code = getattr(error, "code", "")
             if code == "MEDIA_CANCELLED":
                 raise ProviderError("MEDIA_CANCELLED", "播放准备已取消", 409) from None
-            if code == "WEB_PLAYBACK_RESTRICTED":
-                raise ProviderError("MEDIA_ACCESS_RESTRICTED", "官网暂未开放这集的播放权限，已保留当前进度", 403) from None
             raise ProviderError("MEDIA_WEB_UNAVAILABLE", "官网播放线路暂时不可用，请重试当前集") from None
         finally:
             credentials.clear()

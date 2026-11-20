@@ -77,7 +77,7 @@ class OfficialWebSearch:
         return self.suggestions(query,8)
 
     def playback_tracks(self,vid,series_id,episode,quality,cancelled=None,*,session=None):
-        """Use the official playback APIs; denied episodes never become preview substitutes."""
+        """Read this exact episode; anonymous web denial does not prove app entitlement."""
         if not re.fullmatch(r'\d{8,24}',str(vid)) or not re.fullmatch(r'\d{8,24}',str(series_id)):
             raise ValueError('播放参数不正确')
         def check():
@@ -89,7 +89,6 @@ class OfficialWebSearch:
         for item in str(credentials.get('cookie') or '').split(';'):
             name,_,value=item.strip().partition('=')
             if name=='passport_csrf_token':headers['x-tt-passport-csrf-token']=value
-        denied=False
         tracks=[];seen=set()
         for path in ('/api/video/protected/play-info','/api/video/protected/fallback-play-info'):
             check()
@@ -99,7 +98,11 @@ class OfficialWebSearch:
                 client=requests.Session();client.trust_env=False
                 with client:
                     response=client.post(ORIGIN+path,params={'aid':'8662'},json=body,headers=headers,timeout=(4,8),allow_redirects=False)
-                if response.status_code in (401,403):denied=True;continue
+                # The anonymous website route can reject this desktop request
+                # for web-session, anti-bot or client-policy reasons. A generic
+                # HTTP 401/403 does not establish that this episode is locked
+                # in the user's signed-in mobile app.
+                if response.status_code in (401,403):continue
                 if response.status_code!=200 or len(response.content)>1024*1024:continue
                 value=response.json();check()
                 if not isinstance(value,dict) or value.get('base_resp',{}).get('StatusCode') not in (None,0):continue
@@ -124,5 +127,4 @@ class OfficialWebSearch:
             except (requests.RequestException,ValueError,TypeError):continue
         check()
         if tracks:return tracks
-        if denied:raise WebPlaybackError('WEB_PLAYBACK_RESTRICTED','官网暂未开放这集的播放权限，请使用已登录的手机来源')
         raise WebPlaybackError('WEB_PLAYBACK_UNAVAILABLE','官网播放线路暂时不可用，请重试当前集')

@@ -42,12 +42,15 @@ class WebSearchTests(unittest.TestCase):
         self.assertEqual(client.post.call_args_list[0].kwargs['json'],{'item_id':'11111111','series_id':'22222222','definition':'720p'})
         self.assertEqual(len(tracks),1);self.assertEqual(tracks[0]['video_meta']['definition'],'360p')
 
-    def test_denied_episode_cannot_fall_back_to_some_other_preview(self):
-        client=self.client([(403,{'error':'protected_playback_unavailable'}),(403,{'error':'protected_playback_unavailable'})])
-        with patch('web_search.requests.Session',return_value=client),self.assertRaises(WebPlaybackError) as caught:
-            OfficialWebSearch().playback_tracks('11111111','22222222',54,'720p')
-        self.assertEqual(caught.exception.code,'WEB_PLAYBACK_RESTRICTED')
-        self.assertTrue(all(call.kwargs['json']['item_id']=='11111111' for call in client.post.call_args_list))
+    def test_website_auth_denials_are_not_misreported_as_episode_entitlement(self):
+        for status in (401,403):
+            with self.subTest(status=status):
+                client=self.client([(status,{'error':'browser_access_denied'}),
+                                    (status,{'error':'browser_access_denied'})])
+                with patch('web_search.requests.Session',return_value=client),self.assertRaises(WebPlaybackError) as caught:
+                    OfficialWebSearch().playback_tracks('11111111','22222222',54,'720p')
+                self.assertEqual(caught.exception.code,'WEB_PLAYBACK_UNAVAILABLE')
+                self.assertTrue(all(call.kwargs['json']['item_id']=='11111111' for call in client.post.call_args_list))
 
     def test_untrusted_media_address_is_never_used(self):
         client=self.client([(200,{'main_url':'https://untrusted.example/fixture.mp4'}),(200,{'main_url':'http://127.0.0.1/private.mp4'})])

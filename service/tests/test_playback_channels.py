@@ -11,7 +11,7 @@ import requests
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'service'))
 from provider import Provider,ProviderError
-from web_search import WebPlaybackError
+from web_search import OfficialWebSearch, WebPlaybackError
 from vendor.safeguards import AuthExpiredError, RiskControlError
 
 def track(url,definition='1080p',**backups):
@@ -237,15 +237,29 @@ class PlaybackChannelTests(unittest.TestCase):
         self.assertIn('https://backup.example/fresh.mp4',self.urls)
         self.provider.web_search.playback_tracks.assert_called_once()
 
-    def test_website_permission_denial_is_not_cached_or_replaced_with_another_episode(self):
+    def test_website_http_denial_is_not_reported_as_an_episode_permission_failure(self):
         self.sdk.get_video_tracks.side_effect=RuntimeError('controlled mobile outage')
-        website=types.SimpleNamespace(playback_tracks=Mock(side_effect=WebPlaybackError('WEB_PLAYBACK_RESTRICTED','controlled restricted response')))
-        self.provider.web_search=website
-        with self.assertRaises(ProviderError) as caught:self.provider.source('12345678',54)
-        self.assertEqual(caught.exception.code,'MEDIA_ACCESS_RESTRICTED')
-        self.assertEqual(caught.exception.status,403)
-        website.playback_tracks.assert_called_once()
+        self.provider.web_search=OfficialWebSearch()
+        responses=[]
+        for _ in range(2):
+            response=Mock(status_code=403,content=b'bounded',json=Mock(return_value={'error':'browser_access_denied'}))
+            responses.append(response)
+        client=Mock();client.__enter__=Mock(return_value=client);client.__exit__=Mock(return_value=False)
+        client.post.side_effect=responses
+        with patch('web_search.requests.Session',return_value=client),self.assertRaises(ProviderError) as caught:
+            self.provider.source('12345678',54)
+        self.assertEqual(caught.exception.code,'MEDIA_WEB_UNAVAILABLE')
+        self.assertNotIn('权限',caught.exception.message)
+        self.assertEqual(client.post.call_count,2)
         self.assertFalse(self.urls);self.assertFalse(list(self.provider.source_dir.glob('*.mp4')))
+
+    def test_legacy_website_restricted_signal_is_not_trusted_as_mobile_entitlement(self):
+        self.sdk.get_video_tracks.side_effect=RuntimeError('controlled mobile outage')
+        self.provider.web_search=types.SimpleNamespace(playback_tracks=Mock(side_effect=
+            WebPlaybackError('WEB_PLAYBACK_RESTRICTED','unverified website rejection')))
+        with self.assertRaises(ProviderError) as caught:self.provider.source('12345678',54)
+        self.assertEqual(caught.exception.code,'MEDIA_WEB_UNAVAILABLE')
+        self.assertNotIn('权限',caught.exception.message)
 
     def test_web_account_switch_discards_the_previous_accounts_playback_source(self):
         self.sdk.get_video_tracks.side_effect=RuntimeError('controlled mobile outage')
