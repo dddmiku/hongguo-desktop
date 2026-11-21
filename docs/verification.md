@@ -214,3 +214,20 @@ HLS 故障组使用本机受控回复，不表示所有公网中断均已覆盖�
 - 用户要求“先不发”后停止发布进程。远端 1.4.1（Release ID 445410398）仍为未公开草稿，仅含此前构建的安装包和更新清单；未将本轮拖动修复推送或上传。公开最新版本仍为 1.4.0。以后继续发布需将草稿资产替换为本轮最终构建并重新核对，禁止直接公开旧资产。
 
 证据：`_work/window-fullscreen/result.json`、`_work/window-fullscreen/installed-result.json`、`_work/theater-qa/result.json`、`_work/install-upgrade-qa/result.json`。这些是维护记录，不放入发布更新说明。
+
+# 1.5.5 自动切集与等待期间控制栏复检
+
+2026-11-21，Windows 10 x64。范围为 PC 客户端；本轮没有修改 TV 端或上游授权协议。
+
+- 用户补报自动切集卡住时鼠标无法唤出控制栏。受控慢线路在旧代码下复现：`auto-switching` 的 CSS 无条件设定 `opacity:0` 与 `pointer-events:none`，覆盖鼠标显示意图。移除这一条限制后，等待期间能唤栏、实际点击静音并进出全屏。原先左右方向键不主动唤栏的行为不变。
+- 预热首次临时网络失败后，旧逻辑在本集剩余播放期间不再尝试，到片尾才冷启动。新增同一 operation 内最多两次网络/超时重试（1 秒、3 秒退避），前台接管复用任务，取消/隐藏/改选停止后续工作；稳定业务错误与主动取消不重试。
+- 原 HEVC 兼容回退递归漏传 `prewarm`，可在仅 2 秒缓冲时交接；回归先失败，补传后继续遵守预热门槛。另复现 3 倍速的 6 秒完整短集无法满足 9 秒缓冲而卡住，仅在最终 VOD 已封口并且连续缓冲覆盖完整尾部时放行。
+- 同一真实片源第 150 集尾部冻结在约 42.210 秒，媒体结束约 42.467 秒；固定 800ms 冻结兜底加轮询导致旧末帧到新首帧约 1116ms。改为“剩余媒体时长/真实速率 +150ms，最低 250ms”，保留原封口、尾部、播放意图、可见和非 seek 条件；任何持续时间推进均重置冻结预算。同片同速复测间隔约 516ms，减少约 54%，未宣称消除所有停顿。随后正常结束的五次切换约 116–133ms。
+- 前端及主进程 250 项、服务端 352 项、Python 工具 31 项全部通过；另通过历史迁移 3 个故障场景、安装进程隔离 3 组检查、可见性 12 项与跨季改选 33 项回归。服务测试通过随包 Python 在进程内加载已有测试依赖，未给产品运行时安装测试包。
+- 新增 `node tools/qa-playback-transitions.mjs`：本地合成 HLS 驱动实际 Player/双解码器，验证常速与 3 倍速连续自动切集、一次网络错误后的提前预热、慢线路保留旧画面和控件交互、完整短集续播。记录 rVFC 帧、实际推进、空画面与缓冲提示。该组是受控媒体验收，不冒充公网测速。
+- `node tools/qa-playback-startup.mjs` 更新验收计时：集号切换耗时单列，另验证新集首个实际呈现帧和至少 750ms 的连续解码/时间推进；4 次 seek 到片尾、暂停与连播开关、整集自然续播共 17 项通过。真实片源冷缓存准备一轮约 17.3 秒，反映取源和整集下载成本，不能将热缓存结果当冷启动。
+- `qa-seamless.mjs` 随机首页作品一轮在连接片源阶段超时；该轮未通过，不能计作所有线上片源均可播。上述固定剧集实播与受控 HLS 专项另行计数。
+
+证据：`_work/playback-transitions-qa/result.json`、`_work/playback-transitions-qa/waiting-fullscreen-controls.png`、`_work/playback-startup/before-tail-fix.json`、`_work/playback-startup/current/result.json`、`_work/playback-startup/cold-current/result.json`。这些性能数字为本机本轮样本，不是所有线路的保证。
+
+1.5.5 最终构建已直接覆盖到既有 Program Files 安装目录，仅更新程序文件，保留用户档案目录；原程序与 app.asar 保留单槽回滚副本。安装 EXE 产品版本为 1.5.5.0，app.asar 与最终构建摘要一致，23 个服务文件逐个摘要一致。`HG_QA_EXECUTABLE` 指向实际安装 EXE 后执行 `qa-playback-startup.mjs --installed`，17 项实播/连续呈现检查通过；异常尾部同集帧间隔本轮约 634ms，正常自然结束帧间隔约 134ms。直覆不改 Windows 卸载项的显示版本，运行版本以实际 EXE 与应用版本为准。安装版证据为 `_work/playback-startup/installed/result.json`。

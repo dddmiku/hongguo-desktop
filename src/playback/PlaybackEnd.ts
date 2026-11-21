@@ -1,6 +1,6 @@
 export interface EndState {
   id:string;time:number;duration:number;bufferedEnd:number;sealed:boolean;ended:boolean;
-  playing:boolean;seeking:boolean;enabled:boolean;now:number;
+  playing:boolean;seeking:boolean;enabled:boolean;now:number;rate:number;
 }
 
 /** Treat the real ended event as authoritative; recover only a sealed stream frozen at its final samples. */
@@ -18,7 +18,11 @@ export class PlaybackEnd {
     const atTail=state.sealed&&tail>0&&state.duration-tail<=.4&&tail-state.time<=.3&&state.time<=state.duration+.1;
     if(!state.enabled||!state.playing||state.seeking||!Number.isFinite(state.time)||!atTail){this.time=state.time;this.since=state.now;return false;}
     if(state.ended)return true;
-    if(Math.abs(state.time-this.time)>.02){this.time=state.time;this.since=state.now;return false;}
-    return state.now-this.since>=800;
+    if(Math.abs(state.time-this.time)>.000001){this.time=state.time;this.since=state.now;return false;}
+    // Wait long enough for all remaining samples at the actual speed, plus a
+    // decode margin. A sealed A/V tail mismatch need not freeze every cut for 800ms.
+    const rate=Number.isFinite(state.rate)&&state.rate>0?state.rate:1;
+    const wait=Math.max(250,Math.max(0,state.duration-state.time)/rate*1000+150);
+    return state.now>=this.since+wait;
   }
 }

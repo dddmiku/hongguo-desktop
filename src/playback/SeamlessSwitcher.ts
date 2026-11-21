@@ -6,7 +6,10 @@ export interface DeckAdapter<T extends PreparedDeck> {
   afterPresent(): Promise<void>;
 }
 const same = (a: PlaybackTarget, b: PlaybackTarget) => a.seriesId === b.seriesId && a.episode === b.episode && a.quality === b.quality && !!a.compatible === !!b.compatible && Math.abs(a.start - b.start) < .1;
-type Operation<T> = { index:number;target: PlaybackTarget; warm: boolean; prewarm:boolean; abort: AbortController; promise: Promise<T>; deck?: T };
+const aborted=()=>new DOMException('Cancelled','AbortError');
+const transientWarmFailure=(error:unknown)=>error instanceof Error&&error.name!=='AbortError'&&!/(?:^|:\s*)AbortError\b/.test(error.message)&&
+  (['TimeoutError','NetworkError'].includes(error.name)||/fetch failed|failed to fetch|network error|socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ERR_CONNECTION_(?:RESET|CLOSED|TIMED_OUT)|ERR_TIMED_OUT|operation was aborted due to timeout/i.test(error.message));
+type Operation<T> = { index:number;target: PlaybackTarget; warm: boolean; prewarm:boolean; abort: AbortController; promise: Promise<T>; deck?: T; retryNow?:()=>void };
 
 /** Keep the displayed deck alive until the replacement has a decoded frame. */
 export class SeamlessSwitcher<T extends PreparedDeck> {
@@ -17,17 +20,40 @@ export class SeamlessSwitcher<T extends PreparedDeck> {
   private releases=new WeakMap<T,Promise<void>>();
   constructor(private adapter: DeckAdapter<T>) {}
   private release(deck:T){let promise=this.releases.get(deck);if(!promise){try{promise=Promise.resolve(deck.release()).then(()=>{}).catch(()=>{});}catch{promise=Promise.resolve();}this.releases.set(deck,promise);}return promise;}
+  private retryDelay(op:Operation<T>,delay:number){
+    return new Promise<void>((resolve,reject)=>{
+      const finish=(error?:Error)=>{
+        clearTimeout(timer);op.abort.signal.removeEventListener('abort',cancel);
+        if(op.retryNow===wake)op.retryNow=undefined;
+        error?reject(error):resolve();
+      };
+      const wake=()=>finish(),cancel=()=>finish(aborted());
+      const timer=setTimeout(wake,delay);op.retryNow=wake;
+      op.abort.signal.addEventListener('abort',cancel,{once:true});
+      if(op.abort.signal.aborted)cancel();
+    });
+  }
+  private prepare(op:Operation<T>,attempt=0):Promise<T>{
+    if(op.abort.signal.aborted||this.disposed||this.pending!==op)return Promise.reject(aborted());
+    const retry=(error:unknown):Promise<T>=>{
+      // Only speculative warm work retries; explicit foreground errors retain their original behavior.
+      if(!op.warm||attempt>=2||op.abort.signal.aborted||this.disposed||this.pending!==op||!transientWarmFailure(error))return Promise.reject(error);
+      return this.retryDelay(op,attempt===0?1000:3000).then(()=>this.prepare(op,attempt+1));
+    };
+    try{return this.adapter.prepare(op.index,op.target,op.abort.signal,op.prewarm).catch(retry);}
+    catch(error){return retry(error);}
+  }
   private operation(target: PlaybackTarget, warm: boolean): Operation<T> {
-    if (this.pending && same(this.pending.target, target)) { if (!warm) this.pending.warm = false; return this.pending; }
+    if (this.pending && same(this.pending.target, target)) {
+      if(!warm){this.pending.warm=false;this.pending.retryNow?.();}
+      return this.pending;
+    }
     this.cancelPending();
     const index = this.current ? 1 - this.current.index : 0;
     const abort = new AbortController();
     const op: Operation<T> = { index,target, warm, prewarm:warm, abort, promise: undefined as unknown as Promise<T> };
     this.pending = op;
-    op.promise = this.available[index].then(() => {
-      if (abort.signal.aborted || this.disposed) throw new DOMException('Cancelled', 'AbortError');
-      return this.adapter.prepare(index, target, abort.signal, op.prewarm);
-    }).then(deck => {
+    op.promise = this.available[index].then(() => this.prepare(op)).then(deck => {
       if (abort.signal.aborted || this.disposed || this.pending !== op) { return this.release(deck).then(()=>{throw new DOMException('Cancelled', 'AbortError');}); }
       op.deck = deck;
       return deck;

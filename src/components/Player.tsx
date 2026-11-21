@@ -400,7 +400,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
       const end=Number.isFinite(element.duration)?element.duration:deck.duration;
       const ready=completion.current.inspect({id:deck.sessionId,time:element.currentTime,duration:end,
         bufferedEnd:element.buffered.length?element.buffered.end(element.buffered.length-1):0,sealed:deck.sealed,ended:element.ended,
-        playing:shouldPlay.current&&!element.paused,seeking:element.seeking,enabled:visible.current&&!closed.current&&!requested.current&&!error,now:performance.now()});
+        playing:shouldPlay.current&&!element.paused,seeking:element.seeking,enabled:visible.current&&!closed.current&&!requested.current&&!error,now:performance.now(),rate:element.playbackRate});
       if(ready)finishEpisode(deck);
     },200);
     return()=>clearInterval(timer);

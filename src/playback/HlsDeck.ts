@@ -139,7 +139,10 @@ export class HlsDeckLoader {
           if(!prewarm)return true;
           const position=Math.max(0,video.currentTime);
           for(let i=0;i<video.buffered.length;i++){
-            if(video.buffered.start(i)<=position+.05&&video.buffered.end(i)-position>=prewarmBufferSeconds)return true;
+            const end=video.buffered.end(i);
+            // A sealed short episode cannot reach the normal lead, but its entire remaining range is sufficient.
+            const fullTail=deck.sealed&&Number.isFinite(video.duration)&&video.duration>position&&end>=video.duration-.05;
+            if(video.buffered.start(i)<=position+.05&&(end-position>=prewarmBufferSeconds||fullTail))return true;
           }
           return false;
         };
@@ -239,7 +242,7 @@ export class HlsDeckLoader {
       signal.removeEventListener('abort', abort); void deck.release();
       const hevcFrameStalled=usingHevc&&error instanceof Error&&(error as Error&{code?:string}).code===HEVC_FRAME_TIMEOUT_CODE;
       if(hevcFrameStalled&&!signal.aborted)target.compatible=true;
-      if (!signal.aborted && (hevcFrameStalled || target.compatible && (error as Error).message === '显卡解码暂不可用，正在切换兼容播放')) return this.prepare(index,target,signal);
+      if (!signal.aborted && (hevcFrameStalled || target.compatible && (error as Error).message === '显卡解码暂不可用，正在切换兼容播放')) return this.prepare(index,target,signal,prewarm);
       if(error instanceof Error&&error.name!=='AbortError'){
         const readable=error.message.replace(/^Error invoking remote method (?:'[^'\r\n]+'|"[^"\r\n]+"): (?:Error: )?/, '');
         if(readable!==error.message)throw new Error(readable);
