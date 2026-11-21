@@ -14,7 +14,7 @@ vi.mock('hls.js', () => {
     emit(event: string, data?: any) { for (const handler of this.handlers.get(event) ?? []) handler(event, data); }
     attachMedia() {}
     loadSource() {}
-    startLoad() {}
+    startLoad = vi.fn();
     stopLoad = vi.fn();
     destroy() {}
     trigger() {}
@@ -30,6 +30,139 @@ import { HlsDeckLoader } from './HlsDeck';
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.mocked(hardwareHevc).mockReset().mockResolvedValue(false); (Hls as any).instances = []; });
 
 describe('播放会话异步取消', () => {
+  it('窗口隐藏恢复会清空旧的停滞预算并重新启动 HLS',async()=>{
+    vi.useFakeTimers();
+    const listeners=new Map<string,Set<(...args:any[])=>void>>();
+    const video={
+      readyState:2,videoWidth:1920,duration:80,currentTime:23.75,paused:false,ended:false,
+      buffered:{length:0},style:{visibility:''},muted:false,volume:1,
+      pause:vi.fn(),load:vi.fn(),removeAttribute:vi.fn(),
+      addEventListener:vi.fn((name:string,callback:(...args:any[])=>void)=>{const set=listeners.get(name)||new Set();set.add(callback);listeners.set(name,set);}),
+      removeEventListener:vi.fn((name:string,callback:(...args:any[])=>void)=>listeners.get(name)?.delete(callback)),
+      play:vi.fn(async()=>{}),requestVideoFrameCallback:vi.fn((callback:(...args:any[])=>void)=>{queueMicrotask(()=>callback());return 1;}),
+      cancelVideoFrameCallback:vi.fn(),
+    } as unknown as HTMLVideoElement;
+    vi.stubGlobal('HTMLMediaElement',{HAVE_METADATA:1,HAVE_CURRENT_DATA:2});
+    const request=vi.fn(async(path:string)=>path==='/media/session'
+      ?{id:'visibility-session',phase:'complete',url:'/media/visibility.m3u8',duration:80,videoCodec:'h264'}
+      :{});
+    const loader=new HlsDeckLoader([video],{request} as unknown as NativeBridge,vi.fn(),undefined,()=>true);
+    const preparing=loader.prepare(0,{seriesId:'12345678',episode:54,quality:'1080p',start:23.75,compatible:true},new AbortController().signal);
+    const engine=await vi.waitFor(()=>{expect((Hls as any).instances).toHaveLength(1);return (Hls as any).instances[0];});
+    engine.emit((Hls as any).Events.MANIFEST_PARSED);
+    const deck=await preparing;
+    try{
+      await vi.advanceTimersByTimeAsync(5500);
+      expect(engine.startLoad).toHaveBeenCalledOnce();
+      deck.suspendPlayback();expect(engine.stopLoad).toHaveBeenCalledOnce();
+      deck.resumePlayback(23.75);expect(engine.startLoad).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(5500);
+      expect(engine.startLoad).toHaveBeenCalledTimes(3);
+    }finally{deck.release();}
+  });
+  it('三倍速自动切集预热必须缓冲至少9秒才交付解码槽',async()=>{
+    vi.useFakeTimers();
+    const listeners=new Map<string,Set<(...args:any[])=>void>>();let bufferedEnd=0;
+    const video={
+      readyState:2,videoWidth:1920,duration:80,currentTime:0,paused:false,ended:false,
+      buffered:{get length(){return bufferedEnd>0?1:0;},start:()=>0,end:()=>bufferedEnd},style:{visibility:''},muted:false,volume:1,
+      pause:vi.fn(),load:vi.fn(),removeAttribute:vi.fn(),
+      addEventListener:vi.fn((name:string,callback:(...args:any[])=>void)=>{const set=listeners.get(name)||new Set();set.add(callback);listeners.set(name,set);}),
+      removeEventListener:vi.fn((name:string,callback:(...args:any[])=>void)=>listeners.get(name)?.delete(callback)),
+      play:vi.fn(async()=>{}),requestVideoFrameCallback:vi.fn((callback:(...args:any[])=>void)=>{queueMicrotask(()=>callback());return 1;}),
+      cancelVideoFrameCallback:vi.fn(),
+    } as unknown as HTMLVideoElement;
+    vi.stubGlobal('HTMLMediaElement',{HAVE_METADATA:1,HAVE_CURRENT_DATA:2});
+    const request=vi.fn(async(path:string)=>path==='/media/session'
+      ?{id:'prewarm-session',phase:'complete',url:'/media/prewarm.m3u8',duration:80,videoCodec:'h264'}
+      :{});
+    const loader=new HlsDeckLoader([video],{request} as unknown as NativeBridge,vi.fn(),undefined,()=>true,()=>3);
+    let settled=false;
+    const preparing=loader.prepare(0,{seriesId:'12345678',episode:55,quality:'1080p',start:0,compatible:true},new AbortController().signal,true)
+      .then(deck=>{settled=true;return deck;});
+    const engine=await vi.waitFor(()=>{expect((Hls as any).instances).toHaveLength(1);return (Hls as any).instances[0];});
+    engine.emit((Hls as any).Events.MANIFEST_PARSED);
+    await vi.waitFor(()=>expect(video.pause).toHaveBeenCalledTimes(2));
+    expect(settled).toBe(false);
+    bufferedEnd=2;engine.emit((Hls as any).Events.FRAG_BUFFERED,{frag:{type:'main',sn:0}});
+    await Promise.resolve();expect(settled).toBe(false);
+    bufferedEnd=8.5;engine.emit((Hls as any).Events.FRAG_BUFFERED,{frag:{type:'main',sn:1}});
+    await Promise.resolve();expect(settled).toBe(false);
+    bufferedEnd=9.5;engine.emit((Hls as any).Events.FRAG_BUFFERED,{frag:{type:'main',sn:2}});
+    const deck=await preparing;expect(settled).toBe(true);deck.release();
+  });
+  it('后台心跳发现新取流任务失败时把线路原因显示给播放器',async()=>{
+    vi.useFakeTimers();
+    const listeners=new Map<string,Set<(...args:any[])=>void>>();
+    const video={
+      readyState:2,videoWidth:1920,duration:80,currentTime:23.75,paused:true,ended:false,
+      buffered:{length:0},style:{visibility:''},muted:false,volume:1,
+      pause:vi.fn(),load:vi.fn(),removeAttribute:vi.fn(),
+      addEventListener:vi.fn((name:string,callback:(...args:any[])=>void)=>{const set=listeners.get(name)||new Set();set.add(callback);listeners.set(name,set);}),
+      removeEventListener:vi.fn((name:string,callback:(...args:any[])=>void)=>listeners.get(name)?.delete(callback)),
+      play:vi.fn(async()=>{}),requestVideoFrameCallback:vi.fn((callback:(...args:any[])=>void)=>{queueMicrotask(()=>callback());return 1;}),
+      cancelVideoFrameCallback:vi.fn(),
+    } as unknown as HTMLVideoElement;
+    vi.stubGlobal('HTMLMediaElement',{HAVE_METADATA:1,HAVE_CURRENT_DATA:2});
+    const sourceFailure='各播放线路暂时连接失败，请重试当前集';let posts=0;
+    const request=vi.fn(async(path:string,options?:{method?:string})=>{
+      if(path==='/media/session'&&options?.method==='POST'){
+        posts++;
+        return posts===1
+          ? {id:'first',phase:'complete',url:'/media/first.m3u8',duration:80,videoCodec:'h264'}
+          : {id:'replacement',phase:'error',error:sourceFailure,url:'/media/replacement.m3u8'};
+      }
+      if(path==='/media/session/first'&&!options)return {id:'first',phase:'error',error:'旧任务已结束',url:'/media/first.m3u8'};
+      return {};
+    });
+    const fatal=vi.fn();
+    const loader=new HlsDeckLoader([video],{request} as unknown as NativeBridge,fatal);
+    const preparing=loader.prepare(0,{seriesId:'12345678',episode:54,quality:'1080p',start:23.75,compatible:true},new AbortController().signal);
+    let deck;
+    try{
+      await vi.waitFor(()=>expect((Hls as any).instances).toHaveLength(1));
+      (Hls as any).instances[0].emit((Hls as any).Events.MANIFEST_PARSED);
+      deck=await preparing;
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(fatal).toHaveBeenCalledWith(deck,sourceFailure);
+    }finally{deck?.release();}
+  });
+  it('续租网络故障用尽重试预算后停止续租和恢复计时器',async()=>{
+    vi.useFakeTimers();
+    const listeners=new Map<string,Set<(...args:any[])=>void>>();
+    const video={
+      readyState:2,videoWidth:1920,duration:80,currentTime:23.75,paused:true,ended:false,
+      buffered:{length:0},style:{visibility:''},muted:false,volume:1,
+      pause:vi.fn(),load:vi.fn(),removeAttribute:vi.fn(),
+      addEventListener:vi.fn((name:string,callback:(...args:any[])=>void)=>{const set=listeners.get(name)||new Set();set.add(callback);listeners.set(name,set);}),
+      removeEventListener:vi.fn((name:string,callback:(...args:any[])=>void)=>listeners.get(name)?.delete(callback)),
+      play:vi.fn(async()=>{}),requestVideoFrameCallback:vi.fn((callback:(...args:any[])=>void)=>{queueMicrotask(()=>callback());return 1;}),
+      cancelVideoFrameCallback:vi.fn(),
+    } as unknown as HTMLVideoElement;
+    vi.stubGlobal('HTMLMediaElement',{HAVE_METADATA:1,HAVE_CURRENT_DATA:2});
+    let posts=0;
+    const request=vi.fn(async(path:string,options?:{method?:string})=>{
+      if(path==='/media/session'&&options?.method==='POST'){
+        posts++;if(posts===1)return {id:'first',phase:'complete',url:'/media/first.m3u8',duration:80,videoCodec:'h264'};
+        throw new TypeError('fetch failed');
+      }
+      if(path==='/media/session/first'&&!options)throw new Error('播放会话已过期，请重新连接');
+      return {};
+    });
+    const fatal=vi.fn();
+    const loader=new HlsDeckLoader([video],{request} as unknown as NativeBridge,fatal);
+    const preparing=loader.prepare(0,{seriesId:'12345678',episode:54,quality:'1080p',start:23.75,compatible:true},new AbortController().signal);
+    const engine=await vi.waitFor(()=>{expect((Hls as any).instances).toHaveLength(1);return (Hls as any).instances[0];});
+    engine.emit((Hls as any).Events.MANIFEST_PARSED);
+    const deck=await preparing;
+    await vi.advanceTimersByTimeAsync(60000);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(posts).toBe(4);
+    expect(fatal).toHaveBeenCalledWith(deck,'播放连接暂时不可用，请重试当前集');
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(posts).toBe(4);
+    deck.release();
+  });
   it('取流接口业务失败只交付可读错误，不把内部IPC前缀显示给播放器',async()=>{
     const request=vi.fn(async()=>{throw new Error("Error invoking remote method 'api:request': Error: 当前账号暂时不能播放这集");});
     const video={pause:vi.fn(),load:vi.fn(),removeAttribute:vi.fn(),addEventListener:vi.fn(),removeEventListener:vi.fn(),style:{visibility:''},muted:false,volume:1} as unknown as HTMLVideoElement;

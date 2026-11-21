@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Play, Pause, SkipForward, Volume2, VolumeX, Maximize, Minimize, MessageSquare, RotateCcw, ChevronLeft, ChevronRight, X, Heart, Monitor, SlidersHorizontal, LoaderCircle, Keyboard } from 'lucide-react';
 import type { CommentsPage, Episode, Series, SeriesDetail, Settings } from '../../shared/contracts';
 import { SeamlessSwitcher, type PlaybackTarget } from '../playback/SeamlessSwitcher';
+import {WindowPlaybackLifecycle} from '../playback/WindowPlaybackLifecycle';
 import { HlsDeckLoader, type VideoDeck } from '../playback/HlsDeck';
 import {playbackBufferConfig} from '../playback/BufferBudget';
 import {adjacentEpisode,availablePosition,knownDuration} from '../playback/timeline';
@@ -32,7 +33,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
   const switcher = useRef<SeamlessSwitcher<VideoDeck> | null>(null), fullscreenBusy = useRef(false), clickTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined), hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const closed = useRef(false), visible = useRef(isActive), shouldPlay = useRef(true), automaticSwitch = useRef(false), lastSaved = useRef(0), mounted = useRef(false);
   const revealOnPresent = useRef(true);
-  const windowVisible=useRef(true),compatible=useRef(false),interruptedTarget=useRef<PlaybackTarget|null>(null);
+  const windowVisible=useRef(true),windowPlayback=useRef<WindowPlaybackLifecycle|null>(null),compatible=useRef(false),interruptedTarget=useRef<PlaybackTarget|null>(null);
   const latest = useRef({ detail, settings, onSettings, onLibrary, onClose, isActive,onSeries,accountKey }); latest.current = { detail, settings, onSettings, onLibrary, onClose, isActive,onSeries,accountKey };
   const mutedRef = useRef(false), requested = useRef<PlaybackTarget | null>(null),retryTarget=useRef<PlaybackTarget|null>(null);
   const episodeDurations=useRef(new Map<string,number>());
@@ -62,6 +63,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
   const current = () => switcher.current?.current ?? null;
   const video = { get current() { return current()?.video ?? null; } };
   const episodeMeta = detail.episodes.find(item => item.index === episode);
+  const playerGenres=[...new Set(detail.series.tags.map(tag=>tag.trim()).filter(Boolean))].slice(0,3);
   const nextEpisode = () => requested.current?.seriesId===latest.current.detail.series.id?requested.current.episode:current()?.target.episode??episode;
   const rememberDetail=useCallback((value:SeriesDetail)=>{const map=metadata.current;map.delete(value.series.id);map.set(value.series.id,value);for(const sid of map.keys()){if(map.size<=3)break;if(sid!==current()?.target.seriesId&&sid!==value.series.id)map.delete(sid);}},[]);
   const updateSeason=useCallback((value:SeasonState)=>{seasonRef.current=value;setSeasonInfo(value);},[]);
@@ -155,8 +157,8 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     setPendingPosition(displayed?.target.seriesId===next.seriesId&&displayed.target.episode===index&&Math.abs(start-displayed.video.currentTime)>.15?start:null);
     // Hidden windows pause the decoder without changing the user's play/pause choice.
     if(!automatic&&!keepPaused)shouldPlay.current=true;
-    if (current()) { void saveDeck(current()); current()?.video.pause(); }
-    setPendingEpisode(index); setError(''); if (!current()) setPhase('准备播放'); if (!automatic && revealControls) hide();
+    if (current()) { void saveDeck(current()); if(!automatic)current()?.video.pause(); }
+    setPendingEpisode(index); setError(''); if(automatic)setPhase('');else if (!current()) setPhase('准备播放'); if (!automatic && revealControls) hide();
     try {
       const valid=()=>!closed.current&&mounted.current&&requested.current===next&&latest.current.accountKey===account&&allow()&&(!automatic||visible.current&&latest.current.isActive&&latest.current.settings.autoplay&&shouldPlay.current&&current()===displayed);
       const committed = await switcher.current?.select(next, automatic, force,valid);
@@ -211,7 +213,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     const deck=current();
     if(!deck&&requested.current)interruptedTarget.current={...requested.current};
     cancelSeasonPick();seasonTransition.current=null;setContinuing(false);
-    void saveDeck(deck);deck?.video.pause();deck?.hls?.stopLoad();
+    void saveDeck(deck);deck?.suspendPlayback();
     switcher.current?.cancelPending();mediaPreload(window.hongguo).clear();
     requested.current=null;setPendingEpisode(null);setPendingPosition(null);automaticSwitch.current=false;setAutomaticPreparing(false);
     clearTimeout(hideTimer.current);
@@ -222,7 +224,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     if(deck){
       interruptedTarget.current=null;
       if(deck.target.quality!==latest.current.settings.quality){void selectEpisode(deck.target.episode,false,deck.video.currentTime,true);return;}
-      applySound(deck);if(deck.hls){Object.assign(deck.hls.config,playbackBufferConfig(latest.current.settings.rate,false));deck.hls.startLoad(deck.video.currentTime);}scheduleNext(deck);
+      applySound(deck);if(deck.hls)Object.assign(deck.hls.config,playbackBufferConfig(latest.current.settings.rate,false));deck.resumePlayback(deck.video.currentTime);scheduleNext(deck);
       if(shouldPlay.current)void deck.video.play().catch(()=>{if(current()===deck){setPhase('点击开始播放');setChrome(true);}});
       else deck.video.pause();
     }else if(mounted.current&&!requested.current){
@@ -245,7 +247,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
       deck=>current()===deck&&visible.current&&shouldPlay.current&&!closed.current&&!requested.current&&!seasonTransition.current&&!seasonPick.current,
       ()=>latest.current.settings.rate);
     const controller = new SeamlessSwitcher<VideoDeck>({
-      prepare: async(index, wanted, signal) => {const account=latest.current.accountKey;const deck=await loader.prepare(index,wanted,signal);if(account!==latest.current.accountKey){await deck.release();throw new DOMException('Account changed','AbortError');}deckAccounts.current.set(deck,account);deck.video.dataset.seriesId=wanted.seriesId;deck.video.dataset.episode=String(wanted.episode);return deck;},
+      prepare: async(index, wanted, signal, prewarm) => {const account=latest.current.accountKey;const deck=await loader.prepare(index,wanted,signal,prewarm);if(account!==latest.current.accountKey){await deck.release();throw new DOMException('Account changed','AbortError');}deckAccounts.current.set(deck,account);deck.video.dataset.seriesId=wanted.seriesId;deck.video.dataset.episode=String(wanted.episode);return deck;},
       present: (deck, previous, automatic) => {
 
         const destination=metadata.current.get(deck.target.seriesId);
@@ -277,8 +279,8 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
   }, [settings.rate, settings.volume, settings.quality, muted, selectEpisode, isActive]);
   useEffect(()=>{if(!settings.autoplay&&seasonTransition.current?.automatic){shouldPlay.current=false;switcher.current?.cancelPending();requested.current=null;setPendingEpisode(null);setPendingPosition(null);setAutomaticPreparing(false);setChrome(true);}},[settings.autoplay]);
   useEffect(() => {
-    visible.current=isActive&&windowVisible.current;
-    if(!isActive)suspendPlayback();else resumePlayback();
+    const next=isActive&&windowVisible.current&&!document.hidden;
+    visible.current=next;windowPlayback.current?.setVisible(next);
   },[isActive,suspendPlayback,resumePlayback]);
   const toggleFullscreen = useCallback(async () => {
     const layout = playbackLayout.current; if (!layout || fullscreenBusy.current) return; fullscreenBusy.current = true;
@@ -293,10 +295,27 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     const deck = current(); if (!deck || error) return;
     shouldPlay.current = nextPlay; if (shouldPlay.current && visible.current) {deckAccounts.current.set(deck,latest.current.accountKey);completion.current.reset(); applySound(deck);if(!requested.current&&!seasonTransition.current)void deck.video.play().catch(() => {});scheduleNext(deck); } else {deck.video.pause();setPhase('');}setPlaying(shouldPlay.current&&!deck.video.paused); hide();
   }, [error, hide,scheduleNext,cancelSeasonPick]);
-  useEffect(() => window.hongguo.onVisibility(value => {
-    windowVisible.current=value;visible.current=value&&latest.current.isActive;
-    if(!value)suspendPlayback();else resumePlayback();
-  }),[suspendPlayback,resumePlayback]);
+  useEffect(()=>{
+    const initiallyVisible=latest.current.isActive&&windowVisible.current&&!document.hidden;
+    visible.current=initiallyVisible;
+    const lifecycle=new WindowPlaybackLifecycle(suspendPlayback,resumePlayback,initiallyVisible);
+    windowPlayback.current=lifecycle;
+    const syncVisibility=()=>{
+      const next=latest.current.isActive&&windowVisible.current&&!document.hidden;
+      visible.current=next;lifecycle.setVisible(next);
+    };
+    const unsubscribe=window.hongguo.onVisibility(value=>{windowVisible.current=value;syncVisibility();});
+    const onDocumentVisibility=()=>syncVisibility();
+    const onWindowFocus=()=>{
+      if(document.hidden)return;
+      const wasVisible=visible.current;windowVisible.current=true;syncVisibility();
+      if(wasVisible&&visible.current)lifecycle.focus();
+    };
+    document.addEventListener('visibilitychange',onDocumentVisibility);
+    window.addEventListener('focus',onWindowFocus);
+    syncVisibility();
+    return()=>{unsubscribe();document.removeEventListener('visibilitychange',onDocumentVisibility);window.removeEventListener('focus',onWindowFocus);if(windowPlayback.current===lifecycle)windowPlayback.current=null;};
+  },[suspendPlayback,resumePlayback]);
   useEffect(() => window.hongguo.onShutdown(save), [save]);
   const seekTo=useCallback((value:number,revealControls=true)=>{const deck=current();if(!deck||!knownDuration(deck.duration))return;
     cancelSeasonPick();
@@ -395,7 +414,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
   const stageClassName=['video-stage',chrome?'':'controls-hidden',automaticPreparing?'auto-switching':''].filter(Boolean).join(' ');
   const sliderPosition = duration ? Math.min(duration, pendingPosition ?? position) : 0;
   return <div className={`player-page ${theater?'player-theater':''}`}>
-    <div className="player-heading"><button className="btn" onClick={close}><ArrowLeft size={17}/> 返回</button><div><h2>{detail.series.title}</h2><span>第 {episode} 集 · 共 {detail.episodes.length} 集</span>{pendingEpisode&&<small className="switch-status">{pendingPosition!==null?`正在定位到 ${time(pendingPosition)}`:`正在准备第 ${pendingEpisode} 集，保留当前画面`}</small>}</div><button className={`icon-button player-favorite ${favorite?'active':''}`} title={favoriteBusy?'正在同步收藏':favorite?'取消收藏':'收藏'} aria-label={favoriteBusy?'正在同步收藏':favorite?'取消收藏':'收藏'} aria-pressed={favorite} disabled={favoriteBusy} onClick={()=>void changeFavorite()}>{favoriteBusy?<LoaderCircle className="spin" size={20}/>:<Heart size={20} fill={favorite?'currentColor':'none'}/>}</button></div>
+    <div className="player-heading"><button className="btn" onClick={close}><ArrowLeft size={17}/> 返回</button><div><h2>{detail.series.title}</h2>{playerGenres.length>0&&<div className="player-heading-genres" aria-label="本剧类型"><small>类型</small>{playerGenres.map(tag=><span key={tag}>{tag}</span>)}</div>}<span>第 {episode} 集 · 共 {detail.episodes.length} 集</span>{pendingEpisode&&<small className="switch-status">{pendingPosition!==null?`正在定位到 ${time(pendingPosition)}`:`正在准备第 ${pendingEpisode} 集，保留当前画面`}</small>}</div><button className={`icon-button player-favorite ${favorite?'active':''}`} title={favoriteBusy?'正在同步收藏':favorite?'取消收藏':'收藏'} aria-label={favoriteBusy?'正在同步收藏':favorite?'取消收藏':'收藏'} aria-pressed={favorite} disabled={favoriteBusy} onClick={()=>void changeFavorite()}>{favoriteBusy?<LoaderCircle className="spin" size={20}/>:<Heart size={20} fill={favorite?'currentColor':'none'}/>}</button></div>
     <div className="playback-layout" ref={playbackLayout}><div className={stageClassName} onMouseMove={hide} onMouseLeave={()=>{if(playing&&!danmakuPanelRef.current)setChrome(false);}}>
 
       <div className="window-drag-region" aria-hidden="true" />

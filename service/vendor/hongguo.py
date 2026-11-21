@@ -589,6 +589,35 @@ def get_video_tracks(vids, force=False, batch_size=5):
         for _hq_v in batch:
             if str(_hq_v) in _hq_got:
                 continue
+            # The current player-model route may return HTTP 200 with an empty
+            # body. Try the signed video_tab multi-model route, and only accept
+            # a model keyed by this exact requested vid.
+            try:
+                _hq_j = api('GET', '/reading/bookapi/video_tab/multi_video_model/v1/',
+                    extra_query={'video_id': str(_hq_v), 'video_id_type': '0',
+                        'device_level': '1', 'need_all_video_definition': '1',
+                        'need_mp4_align': '0', 'use_os_player': '0',
+                        'video_platform': '1024', 'source': '0', 'from_video_id': ''})
+                _hq_data = _hq_j.get('data') if isinstance(_hq_j, dict) else None
+                if isinstance(_hq_data, dict):
+                    _hq_rows = _hq_data.get('video_model_data')
+                    if not isinstance(_hq_rows, dict):
+                        _hq_rows = _hq_data
+                    _hq_entry = _hq_rows.get(str(_hq_v)) if isinstance(_hq_rows, dict) else None
+                    _hq_model = _hq_entry.get('video_model') if isinstance(_hq_entry, dict) else None
+                    if isinstance(_hq_model, str):
+                        try:
+                            _hq_model = json.loads(_hq_model)
+                        except ValueError:
+                            _hq_model = None
+                    if isinstance(_hq_model, dict) and video_model_tracks(_hq_model):
+                        _hq_got[str(_hq_v)] = {'video_model': json.dumps(_hq_model, ensure_ascii=False)}
+            except (RiskControlError, AuthExpiredError):
+                raise
+            except Exception:
+                pass
+            if str(_hq_v) in _hq_got:
+                continue
             try:
                 _hq_j = api('GET', '/reading/bookapi/video_tab/video_model/v1/', extra_query={'video_id': str(_hq_v), 'need_all_video_definition': '1'})
                 _hq_vm = (_hq_j.get('data') or {}).get('video_model')
@@ -610,7 +639,7 @@ def get_video_tracks(vids, force=False, batch_size=5):
             vm = v.get('video_model')
             if not vm:
                 continue
-            _hq_vmj = json.loads(vm)
+            _hq_vmj = json.loads(vm) if isinstance(vm, str) else vm
             tracks = video_model_tracks(_hq_vmj)
             _hq_fb = _hq_vmj.get('fallback_api')
             if _hq_fb:

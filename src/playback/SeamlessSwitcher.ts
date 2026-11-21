@@ -1,12 +1,12 @@
 export interface PlaybackTarget { seriesId: string; episode: number; quality: string; start: number; duration?: number; compatible?: boolean; }
 export interface PreparedDeck { index: number; target: PlaybackTarget; release(): void | Promise<void>; }
 export interface DeckAdapter<T extends PreparedDeck> {
-  prepare(index: number, target: PlaybackTarget, signal: AbortSignal): Promise<T>;
+  prepare(index: number, target: PlaybackTarget, signal: AbortSignal, prewarm?:boolean): Promise<T>;
   present(next: T, previous: T | null, automatic: boolean): void;
   afterPresent(): Promise<void>;
 }
 const same = (a: PlaybackTarget, b: PlaybackTarget) => a.seriesId === b.seriesId && a.episode === b.episode && a.quality === b.quality && !!a.compatible === !!b.compatible && Math.abs(a.start - b.start) < .1;
-type Operation<T> = { index:number;target: PlaybackTarget; warm: boolean; abort: AbortController; promise: Promise<T>; deck?: T };
+type Operation<T> = { index:number;target: PlaybackTarget; warm: boolean; prewarm:boolean; abort: AbortController; promise: Promise<T>; deck?: T };
 
 /** Keep the displayed deck alive until the replacement has a decoded frame. */
 export class SeamlessSwitcher<T extends PreparedDeck> {
@@ -22,11 +22,11 @@ export class SeamlessSwitcher<T extends PreparedDeck> {
     this.cancelPending();
     const index = this.current ? 1 - this.current.index : 0;
     const abort = new AbortController();
-    const op: Operation<T> = { index,target, warm, abort, promise: undefined as unknown as Promise<T> };
+    const op: Operation<T> = { index,target, warm, prewarm:warm, abort, promise: undefined as unknown as Promise<T> };
     this.pending = op;
     op.promise = this.available[index].then(() => {
       if (abort.signal.aborted || this.disposed) throw new DOMException('Cancelled', 'AbortError');
-      return this.adapter.prepare(index, target, abort.signal);
+      return this.adapter.prepare(index, target, abort.signal, op.prewarm);
     }).then(deck => {
       if (abort.signal.aborted || this.disposed || this.pending !== op) { return this.release(deck).then(()=>{throw new DOMException('Cancelled', 'AbortError');}); }
       op.deck = deck;

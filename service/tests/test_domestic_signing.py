@@ -59,6 +59,54 @@ class ModelRouteTests(unittest.TestCase):
         self.assertEqual(api.call_args.kwargs['body']['dr_scene'],'player')
         self.assertEqual(api.call_args.kwargs['body']['mixed_video_id_map'],{'1004':[vid]})
 
+    def test_empty_current_player_response_falls_back_to_signed_video_tab_for_same_episode(self):
+        vid='12345678';model={'video_list':[{'main_url':'https://cdn.example/video.mp4'}]}
+        upstream=type('UpstreamResponseError',(Exception,),{});empty=upstream('empty')
+        empty_response=type('EmptyResponse',(),{'status_code':200,'content':b''})
+        api=Mock(side_effect=[empty,{'code':0,'data':{'video_model_data':{
+            vid:{'video_model':json.dumps(model)}}}}])
+        namespace=functions(ROOT/'service/vendor/hongguo.py',{'get_video_tracks'},{'json':json,'api':api,
+            'video_model_tracks':lambda value:value.get('video_list',[]),
+            'SG':types.SimpleNamespace(cache_get=lambda key:None,cache_key=lambda *args:args,cache_set=Mock()),
+            'RiskControlError':type('RiskControlError',(Exception,),{}),'AuthExpiredError':type('AuthExpiredError',(Exception,),{}),
+            'UpstreamResponseError':upstream,'_HQEmptyResponse':empty_response})
+        result=namespace['get_video_tracks']([vid],force=True)
+        self.assertEqual(result[vid][0]['main_url'],'https://cdn.example/video.mp4')
+        self.assertEqual(api.call_count,2)
+        self.assertEqual(api.call_args.args,('GET','/reading/bookapi/video_tab/multi_video_model/v1/'))
+        self.assertTrue(api.call_args.kwargs.get('signed',True))
+        self.assertEqual(api.call_args.kwargs['extra_query'],{
+            'video_id':vid,'video_id_type':'0','device_level':'1','need_all_video_definition':'1',
+            'need_mp4_align':'0','use_os_player':'0','video_platform':'1024','source':'0','from_video_id':''})
+
+    def test_video_tab_fallback_accepts_legacy_episode_map_with_decoded_model(self):
+        vid='12345678';model={'video_list':[{'main_url':'https://cdn.example/video.mp4'}]}
+        upstream=type('UpstreamResponseError',(Exception,),{});empty=upstream('empty')
+        empty_response=type('EmptyResponse',(),{'status_code':200,'content':b''})
+        api=Mock(side_effect=[empty,{'code':0,'data':{vid:{'video_model':model}}}])
+        namespace=functions(ROOT/'service/vendor/hongguo.py',{'get_video_tracks'},{'json':json,'api':api,
+            'video_model_tracks':lambda value:value.get('video_list',[]),
+            'SG':types.SimpleNamespace(cache_get=lambda key:None,cache_key=lambda *args:args,cache_set=Mock()),
+            'RiskControlError':type('RiskControlError',(Exception,),{}),'AuthExpiredError':type('AuthExpiredError',(Exception,),{}),
+            'UpstreamResponseError':upstream,'_HQEmptyResponse':empty_response})
+        result=namespace['get_video_tracks']([vid],force=True)
+        self.assertEqual(result[vid][0]['main_url'],'https://cdn.example/video.mp4')
+
+    def test_video_tab_fallback_never_substitutes_another_episode(self):
+        requested='12345678';other='87654321'
+        model={'video_list':[{'main_url':'https://cdn.example/other-episode.mp4'}]}
+        upstream=type('UpstreamResponseError',(Exception,),{});empty=upstream('empty')
+        empty_response=type('EmptyResponse',(),{'status_code':200,'content':b''})
+        api=Mock(side_effect=[empty,{'code':0,'data':{'video_model_data':{
+            other:{'video_model':json.dumps(model)}}}},
+            {'code':0,'data':{}},{'code':0,'data':{}}])
+        namespace=functions(ROOT/'service/vendor/hongguo.py',{'get_video_tracks'},{'json':json,'api':api,
+            'video_model_tracks':lambda value:value.get('video_list',[]),
+            'SG':types.SimpleNamespace(cache_get=lambda key:None,cache_key=lambda *args:args,cache_set=Mock()),
+            'RiskControlError':type('RiskControlError',(Exception,),{}),'AuthExpiredError':type('AuthExpiredError',(Exception,),{}),
+            'UpstreamResponseError':upstream,'_HQEmptyResponse':empty_response})
+        with self.assertRaises(upstream):namespace['get_video_tracks']([requested],force=True)
+
 class PassportSigningTests(unittest.TestCase):
     def test_form_body_is_signed_with_its_actual_digest(self):
         signer=Mock(return_value={});http=Mock(return_value=object())

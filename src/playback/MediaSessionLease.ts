@@ -6,13 +6,22 @@ const expired=(error:unknown)=>error instanceof Error&&/播放会话(?:已过期
 class SessionStateError extends Error{
   constructor(readonly phase:'error'|'cancelled',message:string){super(message);this.name='SessionStateError';}
 }
-const pause=(signal:AbortSignal)=>new Promise<void>((resolve,reject)=>{
+/** A failed replacement job is a source/encode failure, not an expired connection. */
+export class MediaSessionTaskError extends Error{
+  constructor(message:string){super(message);this.name='MediaSessionTaskError';}
+}
+export class MediaSessionRecoveryError extends Error{
+  constructor(){super('播放连接暂时不可用，请重试当前集');this.name='MediaSessionRecoveryError';}
+}
+const transientTransport=(error:unknown)=>error instanceof TypeError||error instanceof Error&&
+  (['AbortError','TimeoutError','NetworkError'].includes(error.name)||/fetch failed|failed to fetch|network error|socket hang up|ECONNRESET|ETIMEDOUT/i.test(error.message));
+const pause=(signal:AbortSignal,delay=150)=>new Promise<void>((resolve,reject)=>{
   const cancel=()=>{clearTimeout(timer);reject(aborted());};
-  const timer=setTimeout(()=>{signal.removeEventListener('abort',cancel);resolve();},150);
+  const timer=setTimeout(()=>{signal.removeEventListener('abort',cancel);resolve();},delay);
   signal.addEventListener('abort',cancel,{once:true});if(signal.aborted)cancel();
 });
 
-/** A player-owned lease. Expired loopback references are rebuilt once without changing the episode. */
+/** A player-owned lease. Session interruptions can recover while healthy heartbeats reset the retry budget. */
 export class MediaSessionLease {
   private current:MediaSession|null=null;
   private released=false;
@@ -66,7 +75,11 @@ export class MediaSessionLease {
     try{
       const result=await this.transport.request(`/media/session/${id}`);this.check();
       if(id!==this.id&&this.current)return this.current;
-      return await this.ready(this.accept(result));
+      const current=await this.ready(this.accept(result));
+      // A successful heartbeat proves this replacement is healthy. Allow one
+      // future renewal for a later, independent interruption.
+      this.renewed=false;
+      return current;
     }catch(error){
       this.check();
       if(id!==this.id&&this.current)return this.current;
@@ -80,8 +93,30 @@ export class MediaSessionLease {
     this.renewed=true;this.dispose(this.id);
     const payload={...this.payload,start:Number.isFinite(position)?Math.max(0,position):this.payload.start};
     this.reconnecting=(async()=>{
-      try{return await this.ready(this.accept(await this.transport.request('/media/session',{method:'POST',body:payload})));}
-      catch(error){this.check();if(expired(error)||error instanceof SessionStateError)throw new Error('播放连接已失效，请重试当前集');throw error;}
+      try{
+        let result:unknown;
+        for(let attempt=0;attempt<3;attempt++){
+          this.check();
+          try{result=await this.transport.request('/media/session',{method:'POST',body:payload});break;}
+          catch(error){
+            this.check();
+            if(!transientTransport(error)||attempt===2)throw new MediaSessionRecoveryError();
+            await pause(this.signal,150*2**attempt);
+          }
+        }
+        return await this.ready(this.accept(result));
+      }
+      catch(error){
+        this.check();
+        if(error instanceof MediaSessionTaskError)throw error;
+        if(error instanceof MediaSessionRecoveryError)throw error;
+        if(error instanceof SessionStateError){
+          if(error.phase==='error')throw new MediaSessionTaskError(error.message);
+          throw new Error('播放会话已过期，请重新连接');
+        }
+        if(expired(error))throw new Error('播放连接已失效，请重试当前集');
+        throw error;
+      }
       finally{this.reconnecting=null;}
     })();
     return this.reconnecting;

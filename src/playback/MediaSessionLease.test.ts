@@ -56,6 +56,72 @@ describe('播放会话续租和过期恢复',()=>{
     expect(request.mock.calls.filter(([,options])=>options?.method==='POST')).toHaveLength(1);
     lease.release();
   });
+  it('替换会话请求遇到短暂网络错误时在有界预算内重试',async()=>{
+    let posts=0;
+    const request=vi.fn(async(path:string,options?:{method?:string})=>{
+      if(path==='/media/session'&&options?.method==='POST'){
+        posts++;if(posts===1)throw new TypeError('fetch failed');return ready('replacement');
+      }
+      if(path==='/media/session/first'&&!options)throw new Error('播放会话已过期，请重新连接');
+      return {};
+    });
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);
+    await lease.open(Promise.resolve(ready('first')));
+    await expect(lease.read(24.5)).resolves.toMatchObject({id:'replacement'});
+    expect(posts).toBe(2);
+    expect(request).toHaveBeenCalledWith('/media/session',{method:'POST',body:{...body,start:24.5}});
+    lease.release();
+  });
+  it('替换会话的短暂网络错误最多重试三次',async()=>{
+    const request=vi.fn(async(path:string,options?:{method?:string})=>{
+      if(path==='/media/session'&&options?.method==='POST')throw new TypeError('fetch failed');
+      if(path==='/media/session/first'&&!options)throw new Error('播放会话已过期，请重新连接');
+      return {};
+    });
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);
+    await lease.open(Promise.resolve(ready('first')));
+    await expect(lease.read(24.5)).rejects.toThrow('播放连接暂时不可用，请重试当前集');
+    expect(request.mock.calls.filter(([path,options])=>path==='/media/session'&&options?.method==='POST')).toHaveLength(3);
+    lease.release();
+  });
+  it('已续租并通过健康心跳后遇到独立失效，仍可恢复原集进度',async()=>{
+    const posts:string[]=[],replacementReads=new Map<string,number>();
+    const request=vi.fn(async(path:string,options?:{method?:string;body?:unknown})=>{
+      if(path==='/media/session'&&options?.method==='POST'){
+        const id=posts.length===0?'first':'replacement-'+posts.length;posts.push(id);return ready(id);
+      }
+      if(path==='/media/session/first'&&!options)return {...ready('first'),phase:'cancelled'};
+      if(path==='/media/session/replacement-1'&&!options){
+        const count=replacementReads.get(path)||0;replacementReads.set(path,count+1);
+        if(count===0)return ready('replacement-1');
+        throw new Error('播放会话已过期，请重新连接');
+      }
+      return {};
+    });
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);
+    await lease.open();
+    await expect(lease.read(23.75)).resolves.toMatchObject({id:'replacement-1'});
+    await expect(lease.read(29.25)).resolves.toMatchObject({id:'replacement-1'});
+    await expect(lease.read(31.5)).resolves.toMatchObject({id:'replacement-2'});
+    expect(posts).toEqual(['first','replacement-1','replacement-2']);
+    expect(request).toHaveBeenCalledWith('/media/session',{method:'POST',body:{...body,start:31.5}});
+    lease.release();
+  });
+  it('旧任务失败后重试原集，新任务再失败时保留具体线路错误',async()=>{
+    let posts=0;const sourceFailure='各播放线路暂时连接失败，请重试当前集';
+    const request=vi.fn(async(path:string,options?:{method?:string})=>{
+      if(path==='/media/session'&&options?.method==='POST'){
+        posts++;return posts===1?ready('first'):{...ready('retry'),phase:'error',error:sourceFailure};
+      }
+      if(path==='/media/session/first'&&!options)return {...ready('first'),phase:'error',error:'旧播放任务已结束'};
+      return {};
+    });
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);
+    await lease.open();
+    await expect(lease.read(23.75)).rejects.toThrow(sourceFailure);
+    expect(posts).toBe(2);
+    lease.release();
+  });
   it.each(['error','cancelled'] as const)('同一活动会话变为 %s 后按真实播放进度重建原集',async phase=>{
     const request=vi.fn(async(path:string,options?:{method?:string;body?:unknown})=>{
       if(path==='/media/session'&&options?.method==='POST')return ready('renewed');
@@ -129,7 +195,7 @@ describe('播放会话续租和过期恢复',()=>{
     });
     const lease=new MediaSessionLease({request},body,new AbortController().signal);
     await lease.open(Promise.resolve(ready('first')));
-    await expect(lease.read(23.75)).rejects.toThrow('播放连接已失效，请重试当前集');
+    await expect(lease.read(23.75)).rejects.toThrow(phase==='error'?'视频转换失败，请重试当前集':'播放会话已过期，请重新连接');
     expect(request.mock.calls.filter(([,options])=>options?.method==='POST')).toHaveLength(1);
     lease.release();
   });
