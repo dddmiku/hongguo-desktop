@@ -12,6 +12,7 @@ const bridge:NativeBridge={
   getHistory:query=>ipcRenderer.invoke('history:query',query),
   toggleFavorite:(series,desired)=>ipcRenderer.invoke('library:favorite',series,desired),removeHistory:id=>ipcRenderer.invoke('library:remove',id),syncLibrary:options=>ipcRenderer.invoke('library:sync',options),
   setOnline:online=>ipcRenderer.invoke('library:online',online),
+  setLibraryView:active=>ipcRenderer.invoke('library:view',active),
   window:action=>ipcRenderer.invoke('window:action',action),openExternal:url=>ipcRenderer.invoke('external:open',url),exportDiagnostics:()=>ipcRenderer.invoke('diagnostics:export'),
   checkUpdate:()=>ipcRenderer.invoke('update:check'),downloadUpdate:info=>ipcRenderer.invoke('update:download',info),
   onUpdate:callback=>{const listener=(_event:Electron.IpcRendererEvent,task:UpdateTask)=>callback(task);ipcRenderer.on('update:progress',listener);return()=>ipcRenderer.removeListener('update:progress',listener);},

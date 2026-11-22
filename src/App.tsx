@@ -91,6 +91,10 @@ export default function App() {
     online();window.addEventListener('online',online);window.addEventListener('offline',online);
     return()=>{window.removeEventListener('online',online);window.removeEventListener('offline',online);};
   },[]);
+  // Fast phone-history reads only while a library/continue-watching view is shown.
+  // Playback keeps the low-frequency background loop and its existing decoders.
+  const libraryView = drawer || !playVisible && page !== 'account' && page !== 'settings';
+  useEffect(()=>{void window.hongguo?.setLibraryView?.(libraryView).catch(()=>{});},[libraryView]);
   useEffect(()=>{
     if(session?.loggedIn&&(drawer||!playVisible&&(page==='history'||page==='favorites')))void window.hongguo.syncLibrary({background:true}).catch(()=>{});
   },[drawer,page,playVisible,session?.loggedIn,session?.uid]);
