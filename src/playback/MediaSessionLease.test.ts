@@ -1,6 +1,95 @@
 import {afterEach,describe,expect,it,vi} from 'vitest';
 import type {MediaSession} from '../../shared/contracts';
-import {MediaSessionLease} from './MediaSessionLease';
+import {MediaSessionLease,MediaSessionNeedsRecoveryError} from './MediaSessionLease';
+// Explicit caller-owned renewal; read itself must never perform POST policy.
+const readRecovering=(lease:MediaSessionLease,position?:number)=>lease.read(position).catch(error=>{
+  if(error instanceof MediaSessionNeedsRecoveryError)return lease.reconnect(position);
+  throw error;
+});
+
+describe('replacement transaction visibility and scoped cancellation',()=>{
+  it('a cancelled operation late finally cannot clear or overwrite the next active transaction',async()=>{
+    let firstComplete!:(value:MediaSession)=>void,secondComplete!:(value:MediaSession)=>void,posts=0;
+    const firstPost=new Promise<MediaSession>(resolve=>{firstComplete=resolve;}),secondPost=new Promise<MediaSession>(resolve=>{secondComplete=resolve;});
+    const request=vi.fn(async(_path:string,options?:{method?:string})=>{if(options?.method==='POST')return ++posts===1?firstPost:secondPost;return {};});
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);await lease.open(Promise.resolve(ready('committed')));
+    const first=lease.reconnect(24.5),firstObserved=expect(first).rejects.toMatchObject({name:'AbortError'});lease.cancelReconnect();
+    const second=lease.reconnect(25);firstComplete(ready('cancelled-candidate'));await firstObserved;
+    expect(lease.id).toBe('committed');const coalesced=lease.reconnect(25.5);await Promise.resolve();expect(posts).toBe(2);
+    secondComplete(ready('accepted-candidate'));await expect(second).resolves.toMatchObject({id:'accepted-candidate'});await expect(coalesced).resolves.toMatchObject({id:'accepted-candidate'});
+    expect(lease.id).toBe('accepted-candidate');
+    expect(request.mock.calls.filter(([path,options])=>path==='/media/session/cancelled-candidate'&&options?.method==='DELETE')).toHaveLength(1);
+    expect(request.mock.calls.filter(([path,options])=>path==='/media/session/committed'&&options?.method==='DELETE')).toHaveLength(1);
+    lease.release();expect(request.mock.calls.filter(([path,options])=>path==='/media/session/accepted-candidate'&&options?.method==='DELETE')).toHaveLength(1);
+  });
+  it.each(['expired','cancelled','error'] as const)('read %s signals recovery using only GET, never a hidden replacement or disposal',async state=>{
+    const request=vi.fn(async(_path:string,options?:{method?:string})=>{
+      if(options)return {};
+      if(state==='expired')throw new Error('播放会话已过期，请重新连接');
+      return {...ready('committed'),phase:state,error:'source failed'};
+    });
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);await lease.open(Promise.resolve(ready('committed')));
+    try{
+      await expect(lease.read(24.5)).rejects.toBeInstanceOf(MediaSessionNeedsRecoveryError);
+      expect(request.mock.calls).toEqual([['/media/session/committed']]);expect(lease.id).toBe('committed');
+    }finally{lease.release();}
+  });
+  it('keeps the committed old ID visible until a replacement is actually ready',async()=>{
+    vi.useFakeTimers();
+    const request=vi.fn(async(path:string,options?:{method?:string})=>{
+      if(options?.method==='POST')return {...ready('candidate'),phase:'preparing'};
+      if(!options&&path==='/media/session/candidate')return ready('candidate');
+      return {};
+    });
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);await lease.open(Promise.resolve(ready('committed')));
+    try{
+      const changing=lease.reconnect(24.5);await vi.advanceTimersByTimeAsync(0);const visibleWhilePreparing=lease.id;
+      await vi.advanceTimersByTimeAsync(150);await expect(changing).resolves.toMatchObject({id:'candidate',phase:'complete'});
+      expect(visibleWhilePreparing).toBe('committed');expect(lease.id).toBe('candidate');
+    }finally{lease.release();}
+  });
+  it('never hands an uncommitted preparing replacement to a late heartbeat of the old ID',async()=>{
+    vi.useFakeTimers();let completeOld!:(value:MediaSession)=>void;
+    const oldRead=new Promise<MediaSession>(resolve=>{completeOld=resolve;});
+    const request=vi.fn(async(path:string,options?:{method?:string})=>{
+      if(options?.method==='POST')return {...ready('candidate'),phase:'preparing'};
+      if(!options&&path==='/media/session/committed')return oldRead;
+      if(!options&&path==='/media/session/candidate')return ready('candidate');
+      return {};
+    });
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);await lease.open(Promise.resolve(ready('committed')));
+    try{
+      const heartbeat=lease.read(24.5),changing=lease.reconnect(24.5);await vi.advanceTimersByTimeAsync(0);
+      completeOld(ready('committed'));const observed=await heartbeat;await vi.advanceTimersByTimeAsync(150);await changing;
+      expect(observed).toMatchObject({id:'committed',phase:'complete'});
+    }finally{lease.release();}
+  });
+  it('a scoped cancel after POST validation but before commit cannot delete the old lease or deliver the new one',async()=>{
+    const request=vi.fn(async(_path:string,options?:{method?:string})=>options?.method==='POST'?ready('candidate'):{});
+    const lease=new MediaSessionLease({request},body,new AbortController().signal);await lease.open(Promise.resolve(ready('committed')));
+    const changing=lease.reconnect(24.5);const observed=changing.then(value=>({value}),error=>({error}));
+    await Promise.resolve();lease.cancelReconnect();const outcome=await observed;
+    try{
+      expect(outcome).toHaveProperty('error');expect(lease.id).toBe('committed');
+      expect(request.mock.calls.filter(([path,options])=>path==='/media/session/candidate'&&options?.method==='DELETE')).toHaveLength(1);
+      expect(request.mock.calls.filter(([path,options])=>path==='/media/session/committed'&&options?.method==='DELETE')).toHaveLength(0);
+    }finally{lease.release();}
+  });
+  it('disposes a late scoped-cancel POST exactly once and preserves an identical committed ID',async()=>{
+    for(const replacementId of ['candidate','committed']){
+      let complete!:(value:MediaSession)=>void;const pending=new Promise<MediaSession>(resolve=>{complete=resolve;});
+      const request=vi.fn(async(_path:string,options?:{method?:string})=>options?.method==='POST'?pending:{});
+      const lease=new MediaSessionLease({request},body,new AbortController().signal);await lease.open(Promise.resolve(ready('committed')));
+      const changing=lease.reconnect(24.5);const observed=expect(changing).rejects.toMatchObject({name:'AbortError'});
+      lease.cancelReconnect();complete(ready(replacementId));await observed;
+      expect(lease.id).toBe('committed');
+      expect(request.mock.calls.filter(([path,options])=>path==='/media/session/committed'&&options?.method==='DELETE')).toHaveLength(0);
+      expect(request.mock.calls.filter(([path,options])=>path==='/media/session/candidate'&&options?.method==='DELETE')).toHaveLength(replacementId==='candidate'?1:0);
+      lease.release();
+      expect(request.mock.calls.filter(([path,options])=>path==='/media/session/committed'&&options?.method==='DELETE')).toHaveLength(1);
+    }
+  });
+});
 
 afterEach(()=>vi.useRealTimers());
 const body={seriesId:'12345678',episode:54,quality:'1080p',start:12.5};
@@ -20,7 +109,7 @@ describe('播放会话续租和过期恢复',()=>{
     });
     const lease=new MediaSessionLease({request},body,new AbortController().signal);
     await lease.open(Promise.resolve(ready('first')));
-    const old=lease.read();expect((await lease.read()).id).toBe('renewed');
+    const old=readRecovering(lease,);expect((await readRecovering(lease,)).id).toBe('renewed');
     late(ready('first'));expect((await old).id).toBe('renewed');expect(lease.id).toBe('renewed');lease.release();
   });
   it('已取消的预热会话重新建立可播放租约，不能直接交给解码器',async()=>{
@@ -43,7 +132,7 @@ describe('播放会话续租和过期恢复',()=>{
     lease.release();
     expect(request.mock.calls.filter(([path,options])=>path==='/media/session/renewed'&&options?.method==='DELETE')).toHaveLength(1);
   });
-  it('活动会话过期后使用原集新租约，第二次连续失效不会无限重试',async()=>{
+  it('租约每次只重建一份原集资源，不再私自耗尽解码恢复协调器的预算',async()=>{
     const request=vi.fn(async(path:string,options?:{method?:string})=>{
       if(path==='/media/session'&&options?.method==='POST')return ready('renewed');
       if(!options)throw new Error('请求的资源不存在或参数不正确');
@@ -51,12 +140,12 @@ describe('播放会话续租和过期恢复',()=>{
     });
     const lease=new MediaSessionLease({request},body,new AbortController().signal);
     await lease.open(Promise.resolve(ready('first')));
-    expect((await lease.read()).id).toBe('renewed');
-    await expect(lease.read()).rejects.toThrow('播放连接已失效，请重试当前集');
-    expect(request.mock.calls.filter(([,options])=>options?.method==='POST')).toHaveLength(1);
+    expect((await readRecovering(lease,)).id).toBe('renewed');
+    await expect(readRecovering(lease,)).resolves.toMatchObject({id:'renewed'});
+    expect(request.mock.calls.filter(([,options])=>options?.method==='POST')).toHaveLength(2);
     lease.release();
   });
-  it('替换会话请求遇到短暂网络错误时在有界预算内重试',async()=>{
+  it('短暂网络错误转交协调器，失败不能删除旧租约或在租约内部嵌套重试',async()=>{
     let posts=0;
     const request=vi.fn(async(path:string,options?:{method?:string})=>{
       if(path==='/media/session'&&options?.method==='POST'){
@@ -67,12 +156,15 @@ describe('播放会话续租和过期恢复',()=>{
     });
     const lease=new MediaSessionLease({request},body,new AbortController().signal);
     await lease.open(Promise.resolve(ready('first')));
-    await expect(lease.read(24.5)).resolves.toMatchObject({id:'replacement'});
+    await expect(readRecovering(lease,24.5)).rejects.toThrow('播放连接暂时不可用');
+    expect(posts).toBe(1);expect(lease.id).toBe('first');
+    expect(request.mock.calls.some(([path,options])=>path==='/media/session/first'&&options?.method==='DELETE')).toBe(false);
+    await expect(lease.reconnect(24.5)).resolves.toMatchObject({id:'replacement'});
     expect(posts).toBe(2);
     expect(request).toHaveBeenCalledWith('/media/session',{method:'POST',body:{...body,start:24.5}});
     lease.release();
   });
-  it('替换会话的短暂网络错误最多重试三次',async()=>{
+  it('一次网络恢复失败只交付一次错误，不私自执行三次快速POST',async()=>{
     const request=vi.fn(async(path:string,options?:{method?:string})=>{
       if(path==='/media/session'&&options?.method==='POST')throw new TypeError('fetch failed');
       if(path==='/media/session/first'&&!options)throw new Error('播放会话已过期，请重新连接');
@@ -80,8 +172,8 @@ describe('播放会话续租和过期恢复',()=>{
     });
     const lease=new MediaSessionLease({request},body,new AbortController().signal);
     await lease.open(Promise.resolve(ready('first')));
-    await expect(lease.read(24.5)).rejects.toThrow('播放连接暂时不可用，请重试当前集');
-    expect(request.mock.calls.filter(([path,options])=>path==='/media/session'&&options?.method==='POST')).toHaveLength(3);
+    await expect(readRecovering(lease,24.5)).rejects.toThrow('播放连接暂时不可用，请重试当前集');
+    expect(request.mock.calls.filter(([path,options])=>path==='/media/session'&&options?.method==='POST')).toHaveLength(1);
     lease.release();
   });
   it('已续租并通过健康心跳后遇到独立失效，仍可恢复原集进度',async()=>{
@@ -100,9 +192,9 @@ describe('播放会话续租和过期恢复',()=>{
     });
     const lease=new MediaSessionLease({request},body,new AbortController().signal);
     await lease.open();
-    await expect(lease.read(23.75)).resolves.toMatchObject({id:'replacement-1'});
-    await expect(lease.read(29.25)).resolves.toMatchObject({id:'replacement-1'});
-    await expect(lease.read(31.5)).resolves.toMatchObject({id:'replacement-2'});
+    await expect(readRecovering(lease,23.75)).resolves.toMatchObject({id:'replacement-1'});
+    await expect(readRecovering(lease,29.25)).resolves.toMatchObject({id:'replacement-1'});
+    await expect(readRecovering(lease,31.5)).resolves.toMatchObject({id:'replacement-2'});
     expect(posts).toEqual(['first','replacement-1','replacement-2']);
     expect(request).toHaveBeenCalledWith('/media/session',{method:'POST',body:{...body,start:31.5}});
     lease.release();
@@ -118,7 +210,7 @@ describe('播放会话续租和过期恢复',()=>{
     });
     const lease=new MediaSessionLease({request},body,new AbortController().signal);
     await lease.open();
-    await expect(lease.read(23.75)).rejects.toThrow(sourceFailure);
+    await expect(readRecovering(lease,23.75)).rejects.toThrow(sourceFailure);
     expect(posts).toBe(2);
     lease.release();
   });
@@ -130,7 +222,7 @@ describe('播放会话续租和过期恢复',()=>{
     });
     const lease=new MediaSessionLease({request},body,new AbortController().signal);
     await lease.open(Promise.resolve(ready('first')));
-    await expect(lease.read(23.75)).resolves.toMatchObject({id:'renewed',phase:'complete'});
+    await expect(readRecovering(lease,23.75)).resolves.toMatchObject({id:'renewed',phase:'complete'});
     expect(request.mock.calls.filter(([,options])=>options?.method==='POST')).toEqual([
       ['/media/session',{method:'POST',body:{...body,start:23.75}}],
     ]);
@@ -144,7 +236,7 @@ describe('播放会话续租和过期恢复',()=>{
       : {});
     const lease=new MediaSessionLease({request},body,new AbortController().signal);
     await lease.open(Promise.resolve(ready('first')));
-    const reading=lease.read(23.75);
+    const reading=readRecovering(lease,23.75);
     await vi.advanceTimersByTimeAsync(150);
     await expect(reading).resolves.toMatchObject({id:'first',phase:'complete'});
     expect(request.mock.calls.filter(([,options])=>!options)).toHaveLength(2);
@@ -164,13 +256,13 @@ describe('播放会话续租和过期恢复',()=>{
     });
     const lease=new MediaSessionLease({request},body,new AbortController().signal);
     await lease.open(Promise.resolve(ready('first')));
-    const old=lease.read(23.75);
+    const old=readRecovering(lease,23.75);
     await vi.advanceTimersByTimeAsync(150);
-    expect((await lease.read(25)).id).toBe('renewed');
+    expect((await readRecovering(lease,25)).id).toBe('renewed');
     complete(ready('first'));
     expect((await old).id).toBe('renewed');expect(lease.id).toBe('renewed');lease.release();
   });
-  it('心跳等待期间本地任务失败也只重建一次，第二次失败给出可读错误',async()=>{
+  it('连续任务失效每次交给同一恢复协调器，不被旧renewed布尔锁永久截断',async()=>{
     vi.useFakeTimers();let firstReads=0;
     const request=vi.fn(async(path:string,options?:{method?:string})=>{
       if(options?.method==='POST')return ready('renewed');
@@ -180,11 +272,11 @@ describe('播放会话续租和过期恢复',()=>{
     });
     const lease=new MediaSessionLease({request},body,new AbortController().signal);
     await lease.open(Promise.resolve(ready('first')));
-    const reading=lease.read(23.75);
+    const reading=readRecovering(lease,23.75);
     await vi.advanceTimersByTimeAsync(150);
     await expect(reading).resolves.toMatchObject({id:'renewed',phase:'complete'});
-    await expect(lease.read(25)).rejects.toThrow('播放连接已失效，请重试当前集');
-    expect(request.mock.calls.filter(([,options])=>options?.method==='POST')).toHaveLength(1);
+    await expect(readRecovering(lease,25)).resolves.toMatchObject({id:'renewed'});
+    expect(request.mock.calls.filter(([,options])=>options?.method==='POST')).toHaveLength(2);
     lease.release();
   });
   it.each(['error','cancelled'] as const)('重建的会话再次返回 %s 时停止恢复并报告失败',async phase=>{
@@ -195,7 +287,7 @@ describe('播放会话续租和过期恢复',()=>{
     });
     const lease=new MediaSessionLease({request},body,new AbortController().signal);
     await lease.open(Promise.resolve(ready('first')));
-    await expect(lease.read(23.75)).rejects.toThrow(phase==='error'?'视频转换失败，请重试当前集':'播放会话已过期，请重新连接');
+    await expect(readRecovering(lease,23.75)).rejects.toThrow(phase==='error'?'视频转换失败，请重试当前集':'播放会话已过期，请重新连接');
     expect(request.mock.calls.filter(([,options])=>options?.method==='POST')).toHaveLength(1);
     lease.release();
   });
@@ -214,7 +306,7 @@ describe('播放会话续租和过期恢复',()=>{
     const request=vi.fn(async()=>{throw new Error(message);});
     const lease=new MediaSessionLease({request},body,new AbortController().signal);
     await lease.open(Promise.resolve(ready('normal')));
-    await expect(lease.read()).rejects.toThrow(message);
+    await expect(readRecovering(lease,)).rejects.toThrow(message);
     expect(request).toHaveBeenCalledOnce();lease.release();
   });
   it('首次准备失败保持原业务错误，不能自动重试被拒绝的播放请求',async()=>{

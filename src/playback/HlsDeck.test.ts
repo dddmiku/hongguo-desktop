@@ -30,6 +30,35 @@ import { HlsDeckLoader } from './HlsDeck';
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.mocked(hardwareHevc).mockReset().mockResolvedValue(false); (Hls as any).instances = []; });
 
 describe('播放会话异步取消', () => {
+  it.each(['fatal-network','silent-empty-buffer'])('ready replacement without decoded health remains recoverable: %s',async(kind)=>{
+    vi.useFakeTimers();
+    let frameRequests=0,posts=0;
+    const video={
+      readyState:2,videoWidth:1920,duration:80,currentTime:23.75,paused:false,ended:false,
+      buffered:{length:0},style:{visibility:''},muted:false,volume:1,
+      pause:vi.fn(),load:vi.fn(),removeAttribute:vi.fn(),addEventListener:vi.fn(),removeEventListener:vi.fn(),
+      play:vi.fn(async()=>{}),requestVideoFrameCallback:vi.fn((callback:(...args:any[])=>void)=>{
+        if(++frameRequests===1)queueMicrotask(()=>callback());return frameRequests;
+      }),cancelVideoFrameCallback:vi.fn(),
+    } as unknown as HTMLVideoElement;
+    vi.stubGlobal('HTMLMediaElement',{HAVE_METADATA:1,HAVE_CURRENT_DATA:2});
+    const request=vi.fn(async(_route:string,options?:{method?:string})=>options?.method==='POST'
+      ?{id:'unhealthy-'+(++posts),phase:'complete',url:'/media/unhealthy-'+posts+'.m3u8',duration:80,videoCodec:'h264'}:{});
+    const fatal=vi.fn(),loader=new HlsDeckLoader([video],{request} as unknown as NativeBridge,fatal,undefined,()=>true);
+    const preparing=loader.prepare(0,{seriesId:'12345678',episode:126,quality:'1080p',start:23.75,compatible:true},new AbortController().signal);
+    const engine=await vi.waitFor(()=>{expect((Hls as any).instances).toHaveLength(1);return (Hls as any).instances[0];});
+    engine.emit((Hls as any).Events.MANIFEST_PARSED);const deck=await preparing;
+    try{
+      engine.emit((Hls as any).Events.ERROR,{fatal:true,type:(Hls as any).ErrorTypes.NETWORK_ERROR});
+      await vi.advanceTimersByTimeAsync(0);expect(posts).toBe(2);expect(deck.sessionId).toBe('unhealthy-2');
+      if(kind==='fatal-network'){
+        engine.emit((Hls as any).Events.ERROR,{fatal:true,type:(Hls as any).ErrorTypes.NETWORK_ERROR});
+        await vi.advanceTimersByTimeAsync(999);expect(posts).toBe(2);
+        await vi.advanceTimersByTimeAsync(1);
+      }else await vi.advanceTimersByTimeAsync(11500);
+      expect(posts).toBe(3);expect(deck.sessionId).toBe('unhealthy-3');expect(fatal).not.toHaveBeenCalled();
+    }finally{deck.release();}
+  });
   it('窗口隐藏恢复会清空旧的停滞预算并重新启动 HLS',async()=>{
     vi.useFakeTimers();
     const listeners=new Map<string,Set<(...args:any[])=>void>>();
@@ -192,6 +221,7 @@ describe('播放会话异步取消', () => {
   });
   it('续租网络故障用尽重试预算后停止续租和恢复计时器',async()=>{
     vi.useFakeTimers();
+    vi.stubGlobal('performance',{now:()=>Date.now()});
     const listeners=new Map<string,Set<(...args:any[])=>void>>();
     const video={
       readyState:2,videoWidth:1920,duration:80,currentTime:23.75,paused:true,ended:false,
@@ -220,10 +250,13 @@ describe('播放会话异步取消', () => {
     const deck=await preparing;
     await vi.advanceTimersByTimeAsync(60000);
     await vi.advanceTimersByTimeAsync(1000);
-    expect(posts).toBe(4);
+    expect(posts).toBe(3);
+    expect(fatal).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60000);
     expect(fatal).toHaveBeenCalledWith(deck,'播放连接暂时不可用，请重试当前集');
+    const exhausted=posts;expect(exhausted).toBeGreaterThan(4);expect(exhausted).toBeLessThanOrEqual(13);
     await vi.advanceTimersByTimeAsync(120000);
-    expect(posts).toBe(4);
+    expect(posts).toBe(exhausted);
     deck.release();
   });
   it('取流接口业务失败只交付可读错误，不把内部IPC前缀显示给播放器',async()=>{

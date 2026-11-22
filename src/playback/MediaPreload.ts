@@ -1,8 +1,9 @@
 import type {MediaSession,NativeBridge} from '../../shared/contracts';
 import type {PlaybackTarget} from './SeamlessSwitcher';
 import {hardwareHevc} from './capabilities';
+import {requestMedia,type MediaRequestTransport} from '../../shared/media-request';
 type Entry={target:PlaybackTarget;promise:Promise<MediaSession>;session?:MediaSession;cancelled:boolean;claimed:boolean;timer?:ReturnType<typeof setTimeout>};
-type MediaTransport={request:(path:string,options?:Parameters<NativeBridge['request']>[1])=>Promise<MediaSession>};
+type MediaTransport=MediaRequestTransport;
 const same=(a:PlaybackTarget,b:PlaybackTarget)=>a.seriesId===b.seriesId&&a.episode===b.episode&&a.quality===b.quality&&!!a.compatible===!!b.compatible&&Math.abs(a.start-b.start)<.1;
 const aborted=()=>new DOMException('Preparation cancelled','AbortError');
 
@@ -12,7 +13,7 @@ export class MediaPreload {
   constructor(private bridge:MediaTransport,private capability=hardwareHevc){}
   private release(entry:Entry){
     entry.cancelled=true;clearTimeout(entry.timer);
-    if(entry.session&&!entry.claimed){const id=entry.session.id;entry.session=undefined;void this.bridge.request(`/media/session/${id}`,{method:'DELETE'}).catch(()=>{});}
+    if(entry.session&&!entry.claimed){const id=entry.session.id;entry.session=undefined;void requestMedia(this.bridge,`/media/session/${id}`,{method:'DELETE'}).catch(()=>{});}
   }
   prepare(target:PlaybackTarget){
     if(this.entry&&same(this.entry.target,target))return;
@@ -22,7 +23,7 @@ export class MediaPreload {
     entry.promise=Promise.resolve().then(async()=>{
       const acceptHevc=!target.compatible&&await this.capability();
       if(entry.cancelled)throw aborted();
-      const session=await this.bridge.request('/media/session',{method:'POST',body:{seriesId:target.seriesId,episode:target.episode,quality:target.quality,start:target.start,...(acceptHevc?{acceptHevc:true}:{})}});
+      const session=await requestMedia<MediaSession>(this.bridge,'/media/session',{method:'POST',body:{seriesId:target.seriesId,episode:target.episode,quality:target.quality,start:target.start,...(acceptHevc?{acceptHevc:true}:{})}});
       if(!session||typeof session.id!=='string'||!session.id)throw new Error('播放准备未完成');
       entry.session=session;
       if(entry.cancelled&&!entry.claimed){this.release(entry);throw aborted();}

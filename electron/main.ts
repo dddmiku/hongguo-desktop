@@ -4,6 +4,10 @@ import fs from 'node:fs/promises';
 import { Store } from './store';
 import { Supervisor } from './supervisor';
 import { LibrarySyncController,type SyncContext } from './library-sync';
+import {PlaybackDiagnostics} from './playback-diagnostics';
+import {PlaybackTrace} from '../src/playback/PlaybackTrace';
+import {sanitizePlaybackTraceSnapshot,type PlaybackTraceSnapshot} from '../shared/playback-diagnostics';
+import {normalizeMediaRequestFailure,type MediaRequestResult} from '../shared/media-request';
 import { readLegacy } from './migration';
 import { readUpdateInfo, UpdateInstaller } from './updater';
 import type { HistoryItem, HistoryQuery, Library, PlaybackProgress, Series, Session, Settings } from '../shared/contracts';
@@ -15,6 +19,14 @@ const startHidden=backgroundQA||process.argv.includes('--start-hidden');
 let window:BrowserWindow, tray:Tray, store:Store, supervisor:Supervisor, quitting=false,currentUid='local';
 let identityRevision = 0;
 let librarySync:LibrarySyncController;
+let playbackDiagnostics:PlaybackDiagnostics;
+const bootStartedAtMs=Date.now();let rendererContextGeneration=0;
+const savePlaybackSnapshot=(snapshot:PlaybackTraceSnapshot,observer:'renderer'|'main')=>{
+  const safe=sanitizePlaybackTraceSnapshot(snapshot);
+  if(!safe||!playbackDiagnostics)return Promise.resolve(false);
+  const receivedAtMs=Date.now();
+  return playbackDiagnostics.appendSnapshot({v:1,events:safe.events.map(event=>({...event,observer,receivedAtMs,bootStartedAtMs,contextGeneration:observer==='renderer'?rendererContextGeneration:0}))});
+};
 const favoriteWrites=new Map<string,Promise<Library>>();
 const favoriteRevisions=new Map<string,number>();
 type RemoteHistoryPage={items:HistoryItem[];hasMore:boolean;nextCursor:string|null;complete:boolean;total:number;warning?:string};
@@ -91,9 +103,13 @@ async function boot(){
   const root=app.isPackaged?path.join(process.resourcesPath,'service'):path.join(app.getAppPath(),'service');
   const runtime=app.isPackaged?path.join(process.resourcesPath,'runtime'):path.join(app.getAppPath(),'runtime');
   const data=process.env.HG_TEST_DATA_DIR||app.getPath('userData');await fs.mkdir(data,{recursive:true});
-  store=new Store(path.join(data,'library.json'));await store.load();supervisor=new Supervisor(root,runtime,data);
+  store=new Store(path.join(data,'library.json'));await store.load();
+  playbackDiagnostics=new PlaybackDiagnostics(data);
+  const backendTrace=new PlaybackTrace({sink:snapshot=>savePlaybackSnapshot(snapshot,'main').then(()=>{})});
+  supervisor=new Supervisor(root,runtime,data,{diagnostic:event=>backendTrace.record({...event,observer:'main'})});
   librarySync=new LibrarySyncController({load:loadLibrary,library:()=>store.library(currentUid),publish:()=>emitLibrary()});
   window=new BrowserWindow({width:1440,height:960,minWidth:940,minHeight:640,show:!startHidden,frame:false,title:'红果桌面',backgroundColor:'#101014',icon:windowIcon(),webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true,...(backgroundQA?{backgroundThrottling:false,offscreen:true}:{})}});
+  window.webContents.on('did-start-navigation',(_event,_url,isInPlace,isMainFrame)=>{if(isMainFrame&&!isInPlace)rendererContextGeneration++;});
   if(backgroundQA)window.webContents.setFrameRate(60);
   librarySync.setActive(backgroundQA||window.isVisible());
   window.webContents.setWindowOpenHandler(()=>({action:'deny'}));window.webContents.on('will-navigate',(e)=>e.preventDefault());
@@ -106,6 +122,17 @@ async function boot(){
   handle('api:request',async(route:string,options={})=>{if(typeof route!=='string'||!allowed.test(route)||route.length>3000)throw new Error('无效接口');if(JSON.stringify(options).length>100000)throw new Error('请求内容过大');const result=await supervisor.request(route,options);if(/^\/catalog\/(home|search|rank|browse)(\?|$)/.test(route)&&!firstCatalogShown){firstCatalogShown=true;startupSyncTimer=setTimeout(startLibrarySync,500);}if(route==='/account/login'||route==='/account/logout'||route==='/account/mfa/verify'||(/^\/account\/qr\/[a-f0-9]{32}$/.test(route)&&(result as {status?:string})?.status==='confirmed')){await refreshIdentity();startLibrarySync();}return result;});
   handle('settings:get',()=>store.settings());handle('settings:save',async(value:Partial<Settings>)=>{const old=store.settings();const settings=await store.saveSettings(value);if(value.bossKey!==undefined&&value.bossKey!==old.bossKey){try{setBossKey(settings);}catch(e){await store.saveSettings({bossKey:old.bossKey});try{setBossKey(old);}catch{}throw e;}}nativeTheme.themeSource=settings.theme;if(value.cacheGB!==undefined)await supervisor.request('/media/cache/settings',{method:'POST',body:{cacheGB:settings.cacheGB}}).catch(()=>{});return settings;});
   handle('library:get',()=>store.library(currentUid));
+  handle('media:request',async(route:string,options:Record<string,unknown>={}):Promise<MediaRequestResult<unknown>>=>{
+    try{
+      if(typeof route!=='string'||!/^\/media\/session(?:\/[A-Za-z0-9_-]{1,128})?$/.test(route)||
+        !options||typeof options!=='object'||Array.isArray(options)||
+        options.method!==undefined&&(typeof options.method!=='string'||!['GET','POST','DELETE'].includes(options.method))||
+        options.timeout!==undefined&&(typeof options.timeout!=='number'||!Number.isSafeInteger(options.timeout)||options.timeout<=0||options.timeout>180000)||
+        JSON.stringify(options).length>100000)throw new Error('无效媒体接口参数');
+      return {ok:true,data:await supervisor.request(route,options)};
+    }catch(error){return {ok:false,error:normalizeMediaRequestFailure(error)};}
+  });
+  handle('playback:diagnostics',snapshot=>savePlaybackSnapshot(snapshot,'renderer').then(()=>{}));
   handle('library:view',(active:boolean)=>{if(typeof active!=='boolean')throw new Error('无效片库可见状态');librarySync.setRealtime(active);});
   handle('library:progress',async(value:PlaybackProgress)=>{
     const uid=currentUid;
@@ -139,7 +166,7 @@ async function boot(){
   handle('library:online',(online:boolean)=>{if(typeof online!=='boolean')throw new Error('网络状态不正确');librarySync.setOnline(online);if(online)resumeHistory();else{clearTimeout(historyTimer);historyTimer=undefined;}});
   handle('window:action',(action:string)=>{if(action==='minimize')window.minimize();else if(action==='maximize')window.isMaximized()?window.unmaximize():window.maximize();else if(action==='close')window.close();else if(action==='quit')app.quit();else if(action==='fullscreen')window.setFullScreen(!window.isFullScreen());else if(action==='exitfullscreen'){const fullscreen=window.isFullScreen();if(fullscreen)window.setFullScreen(false);return fullscreen;}});
   handle('external:open',async(url:string)=>{const u=new URL(url);if(u.protocol!=='https:'||!['github.com','gh-proxy.com'].includes(u.hostname))throw new Error('不支持的链接');await shell.openExternal(url);});
-  handle('diagnostics:export',async()=>{const source=await supervisor.diagnostics();const choice=await dialog.showSaveDialog(window,{title:'导出诊断',defaultPath:'红果桌面-诊断.jsonl'});if(choice.canceled||!choice.filePath)return '';await fs.copyFile(source,choice.filePath);return choice.filePath;});
+  handle('diagnostics:export',async()=>{const source=await supervisor.diagnostics();const choice=await dialog.showSaveDialog(window,{title:'导出诊断',defaultPath:'红果桌面-诊断.jsonl'});if(choice.canceled||!choice.filePath)return '';const events=[...(await playbackDiagnostics.read()),...(await playbackDiagnostics.readLatestFailure())];await fs.writeFile(choice.filePath,(await fs.readFile(source,'utf8'))+'\n'+events.map(event=>JSON.stringify(event)).join('\n'),'utf8');return choice.filePath;});
   const updater = new UpdateInstaller(path.join(data, 'updates'), app.getVersion(), task => {
     if (!window.isDestroyed()) window.webContents.send('update:progress', task);
   }, async file => {
@@ -164,7 +191,7 @@ if(!app.requestSingleInstanceLock())app.quit();else{
   app.whenReady().then(boot).catch(async(error)=>{if(!startHidden)await dialog.showMessageBox({type:'error',message:'客户端启动失败',detail:String(error.message)});else console.error('客户端启动失败：',String(error.message));app.quit();});
   app.on('before-quit',event=>{if(quitting)return;event.preventDefault();quitting=true;librarySync?.dispose();clearTimeout(startupSyncTimer);clearTimeout(historyTimer);globalShortcut.unregisterAll();
     const flushRenderer=new Promise<void>(resolve=>{if(!window||window.isDestroyed()){resolve();return;}const listener=(e:Electron.IpcMainEvent)=>{if(e.sender===window.webContents){clearTimeout(timer);ipcMain.removeListener('app:flushed',listener);resolve();}};const timer=setTimeout(()=>{ipcMain.removeListener('app:flushed',listener);resolve();},1500);ipcMain.on('app:flushed',listener);window.webContents.send('app:flush');});
-    void flushRenderer.then(()=>store?.flush()).catch(()=>{}).then(()=>supervisor?.stop()).catch(()=>{}).finally(()=>{
+    void flushRenderer.then(()=>store?.flush()).catch(()=>{}).then(()=>supervisor?.stop()).catch(()=>{}).then(()=>playbackDiagnostics?.flush()).catch(()=>{}).finally(()=>{
       try{store?.close();}finally{app.quit();}
     }).catch(()=>{});
   });

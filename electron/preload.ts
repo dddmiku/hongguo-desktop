@@ -7,12 +7,14 @@ ipcRenderer.on('app:flush', () => {
 });
 const bridge:NativeBridge={
   request:(path,options)=>ipcRenderer.invoke('api:request',path,options),
+  mediaRequestResult:(path,options)=>ipcRenderer.invoke('media:request',path,options),
   getSettings:()=>ipcRenderer.invoke('settings:get'),saveSettings:value=>ipcRenderer.invoke('settings:save',value),
   getLibrary:()=>ipcRenderer.invoke('library:get'),saveProgress:value=>ipcRenderer.invoke('library:progress',value),
   getHistory:query=>ipcRenderer.invoke('history:query',query),
   toggleFavorite:(series,desired)=>ipcRenderer.invoke('library:favorite',series,desired),removeHistory:id=>ipcRenderer.invoke('library:remove',id),syncLibrary:options=>ipcRenderer.invoke('library:sync',options),
   setOnline:online=>ipcRenderer.invoke('library:online',online),
   setLibraryView:active=>ipcRenderer.invoke('library:view',active),
+  recordPlaybackDiagnostics:snapshot=>ipcRenderer.invoke('playback:diagnostics',snapshot),
   window:action=>ipcRenderer.invoke('window:action',action),openExternal:url=>ipcRenderer.invoke('external:open',url),exportDiagnostics:()=>ipcRenderer.invoke('diagnostics:export'),
   checkUpdate:()=>ipcRenderer.invoke('update:check'),downloadUpdate:info=>ipcRenderer.invoke('update:download',info),
   onUpdate:callback=>{const listener=(_event:Electron.IpcRendererEvent,task:UpdateTask)=>callback(task);ipcRenderer.on('update:progress',listener);return()=>ipcRenderer.removeListener('update:progress',listener);},

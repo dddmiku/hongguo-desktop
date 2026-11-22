@@ -1,3 +1,4 @@
+import type {MediaRequestResult} from './media-request';
 export type Genre = 'short_play' | 'comic_series' | 'ai_series';
 export interface Series { id: string; title: string; cover: string; intro: string; totalEpisodes: number; tags: string[]; actors: string[]; score?: string; }
 export interface Episode { index: number; vid: string; title: string; duration?: number; }
@@ -22,6 +23,7 @@ export interface PlaybackProgress { series: Series; episode: number; position: n
 export interface UpdateInfo { available: boolean; version: string; notes: string; url: string; sha256: string; }
 export interface UpdateTask { phase: string; downloaded: number; total: number; error?: string; }
 export interface NativeBridge {
+  mediaRequestResult<T>(path:string,options?:{method?:string;body?:unknown;timeout?:number}):Promise<MediaRequestResult<T>>;
   request<T>(path: string, options?: { method?: string; body?: unknown; timeout?: number }): Promise<T>;
   getSettings(): Promise<Settings>; saveSettings(value: Partial<Settings>): Promise<Settings>;
   getLibrary(): Promise<Library>; saveProgress(value: PlaybackProgress): Promise<void>;
@@ -30,6 +32,7 @@ export interface NativeBridge {
   syncLibrary(options?:{background?:boolean}): Promise<{ library: Library; warnings: string[] }>;
   setOnline(online:boolean):Promise<void>;
   setLibraryView(active:boolean):Promise<void>;
+  recordPlaybackDiagnostics(snapshot:PlaybackTraceSnapshot):Promise<void>;
   window(action: 'minimize' | 'maximize' | 'close' | 'quit' | 'fullscreen' | 'exitfullscreen'): Promise<void | boolean>;
   openExternal(url: string): Promise<void>; exportDiagnostics(): Promise<string>;
   checkUpdate(): Promise<UpdateInfo>; downloadUpdate(info: UpdateInfo): Promise<void>;
@@ -41,3 +44,4 @@ export interface NativeBridge {
   onSession(callback: (session: Session) => void): () => void;
 }
 declare global { interface Window { hongguo: NativeBridge; } }
+import type {PlaybackTraceSnapshot} from './playback-diagnostics';

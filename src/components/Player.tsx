@@ -7,6 +7,7 @@ import { HlsDeckLoader, type VideoDeck } from '../playback/HlsDeck';
 import {playbackBufferConfig} from '../playback/BufferBudget';
 import {adjacentEpisode,availablePosition,knownDuration} from '../playback/timeline';
 import {PlaybackEnd} from '../playback/PlaybackEnd';
+import {PlaybackTrace} from '../playback/PlaybackTrace';
 import {SeasonContinuation,type SeasonDestination} from '../playback/SeasonContinuation';
 import {mediaPreload} from '../playback/MediaPreload';
 import { danmakuPreferences, type DanmakuPreferences } from '../../shared/danmaku-settings';
@@ -43,6 +44,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
   const pendingDanmaku = useRef<DanmakuPreferences | null>(null);
   const favoritePending=useRef(false);
   const completion=useRef(new PlaybackEnd());
+  const playbackTrace=useRef<PlaybackTrace|null>(null);
   const continuation=useRef<SeasonContinuation|null>(null);if(!continuation.current)continuation.current=new SeasonContinuation(window.hongguo);
   const seasonGeneration=useRef(0),seasonTransition=useRef<{deck:VideoDeck;automatic:boolean}|null>(null);
   const seasonPick=useRef<{id:number;seriesId:string;resumeOriginal:boolean}|null>(null),seasonPickSequence=useRef(0);
@@ -113,7 +115,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     finally{favoritePending.current=false;if(mounted.current)setFavoriteBusy(false);}
   };
   const toggleTheater=useCallback(()=>{const scroll=playbackLayout.current?.closest('.content-scroll') as HTMLElement|null;const next=!theaterRef.current;if(next)theaterScroll.current=scroll?.scrollTop||0;theaterRef.current=next;setTheater(next);requestAnimationFrame(()=>{if(scroll)scroll.scrollTop=next?0:theaterScroll.current;});hide();},[hide]);
-  const applySound = (deck: VideoDeck) => { const s = latest.current.settings; deck.video.playbackRate = s.rate; deck.video.volume = s.volume; deck.video.muted = mutedRef.current; };
+  const applySound = (deck: VideoDeck) => { const s = latest.current.settings; deck.video.defaultPlaybackRate=s.rate;deck.video.playbackRate = s.rate; deck.video.volume = s.volume; deck.video.muted = mutedRef.current; };
   const targetFor=(data:SeriesDetail,index:number,start=0):PlaybackTarget=>({seriesId:data.series.id,episode:index,quality:latest.current.settings.quality,start,compatible:compatible.current,duration:episodeDurations.current.get(`${data.series.id}:${index}`)||knownDuration(data.episodes.find(item=>item.index===index)?.duration)});
   const target = (index: number, start = 0): PlaybackTarget => targetFor(latest.current.detail,index,start);
   const prepareSeason=useCallback((destination:SeasonDestination)=>{
@@ -236,6 +238,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
   useEffect(() => {
 
     mounted.current = true; closed.current = false;
+    const trace=new PlaybackTrace({sink:snapshot=>window.hongguo.recordPlaybackDiagnostics?.(snapshot)});playbackTrace.current=trace;
     const elements = videos.current.filter((element): element is HTMLVideoElement => !!element);
     const loader = new HlsDeckLoader(elements, window.hongguo, (deck, message) => {
       if(current()===deck&&deck.target.compatible&&!compatible.current){compatible.current=true;void selectEpisode(deck.target.episode,false,deck.video.currentTime,true,true);return;}
@@ -245,10 +248,11 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
       if(mounted.current&&(!deck&&requested.current===wanted||deck?.target===wanted&&!requested.current))setPhase(message);
     },
       deck=>current()===deck&&visible.current&&shouldPlay.current&&!closed.current&&!requested.current&&!seasonTransition.current&&!seasonPick.current,
-      ()=>latest.current.settings.rate);
+      ()=>latest.current.settings.rate,trace);
     const controller = new SeamlessSwitcher<VideoDeck>({
       prepare: async(index, wanted, signal, prewarm) => {const account=latest.current.accountKey;const deck=await loader.prepare(index,wanted,signal,prewarm);if(account!==latest.current.accountKey){await deck.release();throw new DOMException('Account changed','AbortError');}deckAccounts.current.set(deck,account);deck.video.dataset.seriesId=wanted.seriesId;deck.video.dataset.episode=String(wanted.episode);return deck;},
       present: (deck, previous, automatic) => {
+        trace.record({stage:'switcher',action:'commit',reason:automatic?'auto-switch':'manual-play',deckSlot:deck.index,episode:deck.target.episode,currentTime:deck.video.currentTime});
 
         const destination=metadata.current.get(deck.target.seriesId);
         if(destination&&latest.current.detail.series.id!==deck.target.seriesId){resetSeason(deck.target.seriesId);latest.current={...latest.current,detail:destination};setDetail(destination);setDanmakuStatus({loading:false,loaded:0,error:''});latest.current.onSeries?.(destination);}
@@ -267,7 +271,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
       afterPresent: nextPaint,
     });
     switcher.current = controller; void selectEpisode(starting.episode, false, starting.position);
-    return () => { mounted.current = false; closed.current = true;seasonPick.current=null;continuation.current?.reset();seasonGeneration.current++;mediaPreload(window.hongguo).clear(); clearTimeout(clickTimer.current); clearTimeout(hideTimer.current); void saveDeck(controller.current); void controller.close(); };
+    return () => { trace.record({stage:'player',action:'dispose',reason:'released'});try{void window.hongguo.recordPlaybackDiagnostics?.(trace.snapshot()).catch(()=>{});}catch{}trace.dispose();if(playbackTrace.current===trace)playbackTrace.current=null;mounted.current = false; closed.current = true;seasonPick.current=null;continuation.current?.reset();seasonGeneration.current++;mediaPreload(window.hongguo).clear(); clearTimeout(clickTimer.current); clearTimeout(hideTimer.current); void saveDeck(controller.current); void controller.close(); };
   }, [starting, hide, selectEpisode, saveDeck,resetSeason]);
   const lastAccount=useRef(accountKey);
   useEffect(()=>{if(lastAccount.current===accountKey)return;lastAccount.current=accountKey;cancelSeasonPick();resetSeason(latest.current.detail.series.id);switcher.current?.cancelPending();requested.current=null;interruptedTarget.current=null;setPendingEpisode(null);setPendingPosition(null);shouldPlay.current=false;current()?.video.pause();completion.current.reset();},[accountKey,resetSeason,cancelSeasonPick]);
@@ -293,6 +297,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     const nextPlay=pending?!shouldPlay.current:!!current()?.video.paused;
     cancelSeasonPick();
     const deck = current(); if (!deck || error) return;
+    playbackTrace.current?.beginIntent(nextPlay?'manual-play':'manual-pause');
     shouldPlay.current = nextPlay; if (shouldPlay.current && visible.current) {deckAccounts.current.set(deck,latest.current.accountKey);completion.current.reset(); applySound(deck);if(!requested.current&&!seasonTransition.current)void deck.video.play().catch(() => {});scheduleNext(deck); } else {deck.video.pause();setPhase('');}setPlaying(shouldPlay.current&&!deck.video.paused); hide();
   }, [error, hide,scheduleNext,cancelSeasonPick]);
   useEffect(()=>{
@@ -316,8 +321,16 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     syncVisibility();
     return()=>{unsubscribe();document.removeEventListener('visibilitychange',onDocumentVisibility);window.removeEventListener('focus',onWindowFocus);if(windowPlayback.current===lifecycle)windowPlayback.current=null;};
   },[suspendPlayback,resumePlayback]);
-  useEffect(() => window.hongguo.onShutdown(save), [save]);
+  useEffect(() => window.hongguo.onShutdown(async()=>{
+    shouldPlay.current=false;visible.current=false;closed.current=true;current()?.video.pause();
+    playbackTrace.current?.record({stage:'player',action:'stop',reason:'released'});
+    await save();
+    try{if(playbackTrace.current)await window.hongguo.recordPlaybackDiagnostics?.(playbackTrace.current.snapshot());}catch{}
+    await switcher.current?.close();
+    try{if(playbackTrace.current)await window.hongguo.recordPlaybackDiagnostics?.(playbackTrace.current.snapshot());}catch{}
+  }), [save]);
   const seekTo=useCallback((value:number,revealControls=true)=>{const deck=current();if(!deck||!knownDuration(deck.duration))return;
+    playbackTrace.current?.beginIntent('seek');
     cancelSeasonPick();
     if(seasonTransition.current){seasonTransition.current=null;setContinuing(false);if(automaticSwitch.current){switcher.current?.cancelPending();requested.current=null;setPendingEpisode(null);setPendingPosition(null);}automaticSwitch.current=false;}
     completion.current.reset();

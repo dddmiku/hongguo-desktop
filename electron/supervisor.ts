@@ -3,8 +3,12 @@ import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { APP_VERSION } from '../shared/meta';
+import type {PlaybackTraceInput} from '../shared/playback-diagnostics';
 
-type SupervisorOptions = { startupTimeoutMs?: number; shutdownTimeoutMs?: number; killTimeoutMs?: number };
+type SupervisorOptions = { startupTimeoutMs?: number; shutdownTimeoutMs?: number; killTimeoutMs?: number;diagnostic?:(event:PlaybackTraceInput)=>unknown };
+class ContentRequestError extends Error {
+  constructor(message:string,readonly kind:'http'|'protocol',readonly status:number,readonly code:string){super(message);this.name='ContentRequestError';}
+}
 
 export class Supervisor {
   private child?: ChildProcessWithoutNullStreams;
@@ -20,11 +24,14 @@ export class Supervisor {
   private startupTimeoutMs: number;
   private shutdownTimeoutMs: number;
   private killTimeoutMs: number;
+  private diagnostic:SupervisorOptions['diagnostic'];
+  private requestGeneration=0;
 
   constructor(private root: string, private runtime: string, private data: string, options: SupervisorOptions = {}) {
     this.startupTimeoutMs = options.startupTimeoutMs ?? 65000;
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? 5000;
     this.killTimeoutMs = options.killTimeoutMs ?? 5000;
+    this.diagnostic=options.diagnostic;
   }
 
   private log(event: string) {
@@ -144,14 +151,23 @@ export class Supervisor {
     if (this.stopping) throw new Error('客户端正在退出');
     await this.start();
     if (this.stopping) throw new Error('客户端正在退出');
-    const response = await fetch(`http://127.0.0.1:${this.port}${route}`, {
+    const media=route.startsWith('/media/session'),jobGeneration=++this.requestGeneration;
+    const episode=typeof options.body==='object'&&options.body!==null?(options.body as {episode?:number}).episode:undefined;
+    const record=(event:PlaybackTraceInput)=>{if(media)try{this.diagnostic?.({...event,stage:'transport',jobGeneration,episode});}catch{}};
+    record({stage:'transport',action:options.method==='POST'?'create':options.method==='DELETE'?'release':'read'});
+    let response:Response;
+    try{response = await fetch(`http://127.0.0.1:${this.port}${route}`, {
       method: options.method || 'GET', headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: AbortSignal.timeout(Math.min(options.timeout || 45000, 180000)),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error?.message || data.detail?.message ||
-      (typeof data.detail === 'string' ? data.detail : '请求失败，请重试'));
+    });}catch(error){record({stage:'transport',action:this.stopping?'cancel':'error',reason:this.stopping?'released':error instanceof Error&&/timeout/i.test(error.message)?'timeout':'network-failed'});throw error;}
+    record({stage:'transport',action:'response',httpStatus:response.status});
+    let data:any;
+    try{data=await response.json();}catch{record({stage:'transport',action:this.stopping?'cancel':'error',httpStatus:response.status,reason:this.stopping?'released':'transport-failed'});throw new ContentRequestError('媒体服务返回异常，请重试当前集',response.ok?'protocol':'http',response.status,'MEDIA_RESPONSE_INVALID');}
+    record({stage:'transport',action:this.stopping?'cancel':!response.ok||data?.phase==='error'?'error':data?.phase==='cancelled'?'cancel':data?.phase==='complete'?'complete':data?.phase==='ready'?'ready':'response',
+      httpStatus:response.status,reason:this.stopping?'released':data?.error?.code==='MEDIA_SESSION_EXPIRED'?'session-expired':response.status===404?'resource-not-found':!response.ok?'http-error':data?.phase==='error'?'pipeline-failed':data?.phase==='cancelled'?'cancelled':'none'});
+    if (!response.ok) throw new ContentRequestError(data?.error?.message || data?.detail?.message ||
+      (typeof data?.detail === 'string' ? data.detail : '请求失败，请重试'),'http',response.status,typeof data?.error?.code==='string'?data.error.code:'MEDIA_HTTP_'+response.status);
     return data as T;
   }
 

@@ -96,4 +96,55 @@ describe('下一集预热的有界网络恢复',()=>{
     await expect(switching).rejects.toThrow('fetch failed');await vi.advanceTimersByTimeAsync(60000);
     expect(f.requests).toHaveLength(2);await f.controller.close();
   });
+  it('自动接管一秒退避仍等剩余时间，保留原operation的第三次恢复机会',async()=>{
+    vi.useFakeTimers();const f=await playing(),warming=f.controller.warm(target(2));
+    await tick();f.requests[1].reject(new TypeError('Failed to fetch'));await vi.advanceTimersByTimeAsync(250);
+    const switching=f.controller.select(target(2),true);await vi.advanceTimersByTimeAsync(0);expect(f.requests).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(749);expect(f.requests).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);expect(f.requests).toHaveLength(3);
+    f.requests[2].reject(new TypeError('Failed to fetch'));await vi.advanceTimersByTimeAsync(2999);expect(f.requests).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1);expect(f.requests).toHaveLength(4);
+    expect(f.requests[3].signal).toBe(f.requests[1].signal);expect(f.requests[3].prewarm).toBe(true);
+    const prepared=f.resolve(3);await expect(switching).resolves.toBe(prepared);await warming;f.paint();await f.controller.close();
+  });
+  it('自动接管三秒退避与重复接管不重新开三次预算',async()=>{
+    vi.useFakeTimers();const f=await playing(),warming=f.controller.warm(target(2));
+    await tick();f.requests[1].reject(new TypeError('Failed to fetch'));await vi.advanceTimersByTimeAsync(1000);
+    f.requests[2].reject(new TypeError('Failed to fetch'));await vi.advanceTimersByTimeAsync(500);
+    const first=f.controller.select(target(2),true),duplicate=f.controller.select(target(2),true);
+    const failures=Promise.all([expect(first).rejects.toThrow('Failed to fetch'),expect(duplicate).resolves.toBeNull()]);
+    await vi.advanceTimersByTimeAsync(2499);expect(f.requests).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1);expect(f.requests).toHaveLength(4);
+    f.requests[3].reject(new TypeError('Failed to fetch'));await failures;await expect(warming).resolves.toBeNull();
+    await vi.advanceTimersByTimeAsync(60000);expect(f.requests).toHaveLength(4);await f.controller.close();
+  });
+  it('自动接管后用户同目标选择仍立即接管，后续失败不再后台重复',async()=>{
+    vi.useFakeTimers();const f=await playing(),warming=f.controller.warm(target(2));
+    await tick();f.requests[1].reject(new TypeError('Failed to fetch'));await vi.advanceTimersByTimeAsync(250);
+    const automatic=f.controller.select(target(2),true),manual=f.controller.select(target(2),false);
+    const failures=Promise.all([expect(automatic).rejects.toThrow('Failed to fetch'),expect(manual).resolves.toBeNull()]);
+    await vi.advanceTimersByTimeAsync(0);expect(f.requests).toHaveLength(3);f.requests[2].reject(new TypeError('Failed to fetch'));
+    await failures;await warming;await vi.advanceTimersByTimeAsync(60000);expect(f.requests).toHaveLength(3);await f.controller.close();
+  });
+  it.each(['cancelPending','close'] as const)('自动接管后的退避期间 %s 立即终止且不提交新槽',async action=>{
+    vi.useFakeTimers();const f=await playing(),old=f.controller.current,warming=f.controller.warm(target(2));
+    await tick();f.requests[1].reject(new TypeError('Failed to fetch'));await vi.advanceTimersByTimeAsync(250);
+    const switching=f.controller.select(target(2),true);await vi.advanceTimersByTimeAsync(0);
+    await f.controller[action]();await expect(switching).resolves.toBeNull();await warming;
+    await vi.advanceTimersByTimeAsync(60000);expect(f.requests).toHaveLength(2);
+    expect(f.events).not.toContain('present:2:was:1');if(action==='cancelPending')expect(f.controller.current).toBe(old);await f.controller.close();
+  });
+  it('自动接管后的退避改目标立即取消，新用户目标不等待旧预算',async()=>{
+    vi.useFakeTimers();const f=await playing(),warming=f.controller.warm(target(2));
+    await tick();f.requests[1].reject(new TypeError('Failed to fetch'));await vi.advanceTimersByTimeAsync(250);
+    const automatic=f.controller.select(target(2),true),manual=f.controller.select(target(3));await vi.advanceTimersByTimeAsync(0);
+    expect(f.requests).toHaveLength(3);expect(f.requests[2].target.episode).toBe(3);expect(f.requests[1].signal.aborted).toBe(true);
+    await expect(automatic).resolves.toBeNull();await warming;f.resolve(2);await manual;f.paint();
+    await vi.advanceTimersByTimeAsync(60000);expect(f.requests).toHaveLength(3);await f.controller.close();
+  });
+  it.each([new Error('这一集暂不可播放'),new Error('登录态已失效'),new Error('视频转码失败')])('自动接管后业务错误 %s 不消耗网络重试预算',async error=>{
+    vi.useFakeTimers();const f=await playing(),warming=f.controller.warm(target(2));await tick();
+    const switching=f.controller.select(target(2),true),failed=expect(switching).rejects.toThrow(error.message);
+    f.requests[1].reject(error);await failed;await warming;await vi.advanceTimersByTimeAsync(60000);expect(f.requests).toHaveLength(2);await f.controller.close();
+  });
 });

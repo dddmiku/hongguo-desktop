@@ -1,4 +1,5 @@
 export interface PlaybackTarget { seriesId: string; episode: number; quality: string; start: number; duration?: number; compatible?: boolean; }
+import {isRetryableMediaRequestError} from '../../shared/media-request';
 export interface PreparedDeck { index: number; target: PlaybackTarget; release(): void | Promise<void>; }
 export interface DeckAdapter<T extends PreparedDeck> {
   prepare(index: number, target: PlaybackTarget, signal: AbortSignal, prewarm?:boolean): Promise<T>;
@@ -8,8 +9,8 @@ export interface DeckAdapter<T extends PreparedDeck> {
 const same = (a: PlaybackTarget, b: PlaybackTarget) => a.seriesId === b.seriesId && a.episode === b.episode && a.quality === b.quality && !!a.compatible === !!b.compatible && Math.abs(a.start - b.start) < .1;
 const aborted=()=>new DOMException('Cancelled','AbortError');
 const transientWarmFailure=(error:unknown)=>error instanceof Error&&error.name!=='AbortError'&&!/(?:^|:\s*)AbortError\b/.test(error.message)&&
-  (['TimeoutError','NetworkError'].includes(error.name)||/fetch failed|failed to fetch|network error|socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ERR_CONNECTION_(?:RESET|CLOSED|TIMED_OUT)|ERR_TIMED_OUT|operation was aborted due to timeout/i.test(error.message));
-type Operation<T> = { index:number;target: PlaybackTarget; warm: boolean; prewarm:boolean; abort: AbortController; promise: Promise<T>; deck?: T; retryNow?:()=>void };
+  isRetryableMediaRequestError(error);
+type Operation<T> = { index:number;target: PlaybackTarget; warm: boolean; retryWarm:boolean; prewarm:boolean; abort: AbortController; promise: Promise<T>; deck?: T; retryNow?:()=>void };
 
 /** Keep the displayed deck alive until the replacement has a decoded frame. */
 export class SeamlessSwitcher<T extends PreparedDeck> {
@@ -36,22 +37,23 @@ export class SeamlessSwitcher<T extends PreparedDeck> {
   private prepare(op:Operation<T>,attempt=0):Promise<T>{
     if(op.abort.signal.aborted||this.disposed||this.pending!==op)return Promise.reject(aborted());
     const retry=(error:unknown):Promise<T>=>{
-      // Only speculative warm work retries; explicit foreground errors retain their original behavior.
-      if(!op.warm||attempt>=2||op.abort.signal.aborted||this.disposed||this.pending!==op||!transientWarmFailure(error))return Promise.reject(error);
+      // Automatic presentation inherits this warm operation's remaining budget,
+      // not a fresh budget. A manual takeover retains immediate-error semantics.
+      if(!op.retryWarm||attempt>=2||op.abort.signal.aborted||this.disposed||this.pending!==op||!transientWarmFailure(error))return Promise.reject(error);
       return this.retryDelay(op,attempt===0?1000:3000).then(()=>this.prepare(op,attempt+1));
     };
     try{return this.adapter.prepare(op.index,op.target,op.abort.signal,op.prewarm).catch(retry);}
     catch(error){return retry(error);}
   }
-  private operation(target: PlaybackTarget, warm: boolean): Operation<T> {
+  private operation(target: PlaybackTarget, warm: boolean, automatic=false): Operation<T> {
     if (this.pending && same(this.pending.target, target)) {
-      if(!warm){this.pending.warm=false;this.pending.retryNow?.();}
+      if(!warm){this.pending.warm=false;if(!automatic){this.pending.retryWarm=false;this.pending.retryNow?.();}}
       return this.pending;
     }
     this.cancelPending();
     const index = this.current ? 1 - this.current.index : 0;
     const abort = new AbortController();
-    const op: Operation<T> = { index,target, warm, prewarm:warm, abort, promise: undefined as unknown as Promise<T> };
+    const op: Operation<T> = { index,target, warm, retryWarm:warm, prewarm:warm, abort, promise: undefined as unknown as Promise<T> };
     this.pending = op;
     op.promise = this.available[index].then(() => this.prepare(op)).then(deck => {
       if (abort.signal.aborted || this.disposed || this.pending !== op) { return this.release(deck).then(()=>{throw new DOMException('Cancelled', 'AbortError');}); }
@@ -65,7 +67,7 @@ export class SeamlessSwitcher<T extends PreparedDeck> {
   async select(target: PlaybackTarget, automatic = false, force = false,allowPresent:()=>boolean=()=>true): Promise<T | null> {
     if (this.disposed||!allowPresent()) return null;
     if (!force && this.current && same(this.current.target, target)) return this.current;
-    const op = this.operation(target, false);
+    const op = this.operation(target, false, automatic);
     try {
       const deck = await op.promise;
       if (this.disposed || this.pending !== op || op.abort.signal.aborted) return null;
