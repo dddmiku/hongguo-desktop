@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, globalShortcut, nativeTheme, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, globalShortcut, nativeTheme, dialog, screen } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { Store } from './store';
@@ -19,6 +19,7 @@ const startHidden=backgroundQA||process.argv.includes('--start-hidden');
 let window:BrowserWindow, tray:Tray, store:Store, supervisor:Supervisor, quitting=false,currentUid='local';
 let identityRevision = 0;
 let librarySync:LibrarySyncController;
+let pipState:{bounds:Electron.Rectangle;maximized:boolean}|null=null;
 let playbackDiagnostics:PlaybackDiagnostics;
 const bootStartedAtMs=Date.now();let rendererContextGeneration=0;
 const savePlaybackSnapshot=(snapshot:PlaybackTraceSnapshot,observer:'renderer'|'main')=>{
@@ -164,7 +165,31 @@ async function boot(){
   });
   handle('library:sync',(options:{background?:boolean}={})=>{if(!options||typeof options!=='object'||options.background!==undefined&&typeof options.background!=='boolean')throw new Error('同步参数不正确');return librarySync.request(!options.background);});
   handle('library:online',(online:boolean)=>{if(typeof online!=='boolean')throw new Error('网络状态不正确');librarySync.setOnline(online);if(online)resumeHistory();else{clearTimeout(historyTimer);historyTimer=undefined;}});
-  handle('window:action',(action:string)=>{if(action==='minimize')window.minimize();else if(action==='maximize')window.isMaximized()?window.unmaximize():window.maximize();else if(action==='close')window.close();else if(action==='quit')app.quit();else if(action==='fullscreen')window.setFullScreen(!window.isFullScreen());else if(action==='exitfullscreen'){const fullscreen=window.isFullScreen();if(fullscreen)window.setFullScreen(false);return fullscreen;}});
+  handle('window:action',(action:string)=>{
+    if(action==='minimize')window.minimize();
+    else if(action==='maximize')window.isMaximized()?window.unmaximize():window.maximize();
+    else if(action==='close')window.close();
+    else if(action==='quit')app.quit();
+    else if(action==='fullscreen')window.setFullScreen(!window.isFullScreen());
+    else if(action==='exitfullscreen'){const fullscreen=window.isFullScreen();if(fullscreen)window.setFullScreen(false);return fullscreen;}
+    else if(action==='pip'){
+      if(!pipState){pipState={bounds:window.getNormalBounds(),maximized:window.isMaximized()};}
+      if(pipState.maximized)window.unmaximize();
+      if(window.isFullScreen())window.setFullScreen(false);
+      const workArea=screen.getPrimaryDisplay().workAreaSize;
+      const width=Math.min(480,workArea.width-24),height=Math.round(width*9/16);
+      const x=pipState.bounds.x+Math.max(0,pipState.bounds.width-width),y=pipState.bounds.y+Math.max(0,pipState.bounds.height-height);
+      window.setMinimumSize(280,158);window.setResizable(true);window.setBounds({x,y,width,height});window.setAlwaysOnTop(true,'screen-saver');
+      return true;
+    }
+    else if(action==='exitpip'){
+      if(!pipState)return false;
+      const bounds=pipState.bounds;const maximized=pipState.maximized;pipState=null;
+      window.setAlwaysOnTop(false);window.setMinimumSize(940,640);window.setResizable(true);window.setBounds(bounds);
+      if(maximized)window.maximize();
+      return true;
+    }
+  });
   handle('external:open',async(url:string)=>{const u=new URL(url);if(u.protocol!=='https:'||!['github.com','gh-proxy.com'].includes(u.hostname))throw new Error('不支持的链接');await shell.openExternal(url);});
   handle('diagnostics:export',async()=>{const source=await supervisor.diagnostics();const choice=await dialog.showSaveDialog(window,{title:'导出诊断',defaultPath:'红果桌面-诊断.jsonl'});if(choice.canceled||!choice.filePath)return '';const events=[...(await playbackDiagnostics.read()),...(await playbackDiagnostics.readLatestFailure())];await fs.writeFile(choice.filePath,(await fs.readFile(source,'utf8'))+'\n'+events.map(event=>JSON.stringify(event)).join('\n'),'utf8');return choice.filePath;});
   const updater = new UpdateInstaller(path.join(data, 'updates'), app.getVersion(), task => {

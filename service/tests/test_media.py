@@ -110,6 +110,44 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(manager.cache_status()["active"], 0)
         self.assertFalse(list(manager.root.glob("*.part")))
 
+    def test_cancelled_source_finishing_returns_busy_not_resource_not_found_then_can_play(self):
+        from gateway import create_app
+        import secrets
+
+        class FinishingSource(Provider):
+            def source(self, sid, episode, quality, cancelled):
+                self.started.set()
+                if not self.release.wait(3):
+                    raise RuntimeError("test cancellation gate timed out")
+                if cancelled():
+                    raise RuntimeError("cancelled source")
+                return self.path
+
+        provider = FinishingSource(self.source, hold=True)
+        manager = self.manager(provider)
+        credential = secrets.token_hex(32)
+        client = TestClient(create_app(object(), credential, manager))
+        headers = {"Authorization": "Bearer " + credential}
+        payload = {"seriesId": "12345678", "episode": 175, "quality": "1080p", "start": 0}
+        try:
+            first = client.post("/media/session", json=payload, headers=headers)
+            self.assertEqual(first.status_code, 200)
+            self.assertTrue(provider.started.wait(2))
+            cancelled = client.delete("/media/session/" + first.json()["id"], headers=headers)
+            self.assertEqual(cancelled.status_code, 200)
+            busy = client.post("/media/session", json=payload, headers=headers)
+            self.assertEqual(busy.status_code, 429)
+            self.assertEqual(busy.headers.get("Retry-After"), "1")
+            self.assertEqual(busy.json()["error"]["code"], "MEDIA_BUSY")
+            self.assertIn("上一任务正在结束", busy.json()["error"]["message"])
+            provider.release.set()
+            wait_for(lambda: manager.pending == 0)
+            second = client.post("/media/session", json=payload, headers=headers)
+            self.assertEqual(second.status_code, 200)
+            wait_for(lambda: manager.get(second.json()["id"])["phase"] == "complete")
+        finally:
+            provider.release.set()
+
     def test_permission_failure_preserves_fixed_business_reason_without_raw_source_details(self):
         from provider import ProviderError
         class RestrictedSource(Provider):

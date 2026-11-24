@@ -1,5 +1,5 @@
 """Catch request-body/signature divergence and loss of mobile playback identity."""
-import ast,base64,gzip,hashlib,json,re,time,types,unittest
+import ast,base64,ctypes,gzip,hashlib,json,re,socket,struct,time,types,unittest
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -51,6 +51,76 @@ class SigningTests(unittest.TestCase):
     def test_empty_signature_is_rejected(self):
         self.adapter.post.return_value.json.return_value={}
         with self.assertRaisesRegex(RuntimeError,'unavailable'):self.namespace['sign']('https://reading.snssdk.com/fixture',{})
+
+class SignerPortDiscoveryTests(unittest.TestCase):
+    """Windows 11 26H2 reports unreliable dwState for live listeners in
+    GetExtendedTcpTable(TCP_TABLE_OWNER_PID_LISTENER); see issues #1/#3.
+    Discovery must match by PID only and fall back to the signer stdout port."""
+
+    def load_gateway_symbols(self):
+        source=(ROOT/'service/gateway.py').read_text(encoding='utf-8')
+        tree=ast.parse(source)
+        wanted={'owned_listener'}
+        body=[node for node in tree.body
+              if (isinstance(node,ast.FunctionDef) and node.name in wanted)
+              or (isinstance(node,ast.ClassDef) and node.name=='TcpRow')]
+        namespace={'socket':socket,'struct':struct,'ctypes':ctypes}
+        exec(compile(ast.Module(body=body,type_ignores=[]),str(ROOT/'service/gateway.py'),'exec'),namespace)
+        return namespace
+
+    def test_listener_rows_match_by_pid_without_state_filter(self):
+        source=(ROOT/'service/gateway.py').read_text(encoding='utf-8')
+        self.assertNotIn('row.state == 2', source)
+        self.assertIn('if row.pid == pid:', source)
+
+    def fake_table(self,row):
+        """Emulate GetExtendedTcpTable: a size query then a full-table copy."""
+        row_bytes=bytes(memoryview(row).cast('B'))
+        payload=struct.pack('<I',1)+row_bytes
+        def query(buffer,size_ref,send,af,class_id,flags):
+            size_ptr=ctypes.cast(size_ref,ctypes.POINTER(ctypes.c_uint32))
+            size_ptr.contents.value=len(payload)
+            if buffer is None:
+                return 0
+            ctypes.memmove(buffer,payload,len(payload))
+            return 0
+        return query
+
+    def with_fake_table(self,row,action):
+        fake=types.SimpleNamespace(GetExtendedTcpTable=self.fake_table(row))
+        original=ctypes.WinDLL
+        ctypes.WinDLL=lambda *args, **kwargs: fake
+        try:
+            return action()
+        finally:
+            ctypes.WinDLL=original
+
+    def test_owned_listener_accepts_state_zero_listener_rows(self):
+        namespace=self.load_gateway_symbols()
+        row=namespace['TcpRow']()
+        row.state=0; row.address=struct.unpack('=I',socket.inet_aton('127.0.0.1'))[0]; row.port=socket.htons(45678)
+        row.remote_address=0; row.remote_port=0; row.pid=4242
+        result=self.with_fake_table(row,lambda: namespace['owned_listener'](4242))
+        self.assertEqual(result,45678)
+
+    def test_owned_listener_rejects_non_loopback_rows(self):
+        namespace=self.load_gateway_symbols()
+        row=namespace['TcpRow']()
+        row.state=0; row.address=struct.unpack('=I',socket.inet_aton('192.168.1.5'))[0]; row.port=socket.htons(45678)
+        row.remote_address=0; row.remote_port=0; row.pid=4242
+        with self.assertRaisesRegex(RuntimeError,'loopback'):
+            self.with_fake_table(row,lambda: namespace['owned_listener'](4242))
+
+    def test_startup_uses_table_then_stdout_fallback_with_health_probe(self):
+        source=(ROOT/'service/gateway.py').read_text(encoding='utf-8')
+        self.assertIn('owned_listener(self.process.pid) or self.stdout_port', source)
+        self.assertIn('urllib.request.urlopen(candidate + "/health"', source)
+
+    def test_parent_watch_reads_stdin_without_buffered_reader(self):
+        source=(ROOT/'service/gateway.py').read_text(encoding='utf-8')
+        self.assertNotIn('sys.stdin.buffer.read(1)', source)
+        self.assertIn('while os.read(0, 1):', source)
+
 
 class PlaybackQueryTests(unittest.TestCase):
     """A zero-byte HTTP 200 from player routes is caused by a missing

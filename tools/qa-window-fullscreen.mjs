@@ -20,6 +20,7 @@ const server = createServer(async (req, res) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const mediaUrl = `http://127.0.0.1:${server.address().port}/sample.m3u8`;
 const installed = process.argv.includes('--installed'), packaged = process.argv.includes('--packaged'), checks = [], errors = [];
+const focusOnly=process.argv.includes('--focus-only');
 const packagedPath = process.env.HG_QA_PACKAGED_PATH || path.join(root, 'release/win-unpacked/红果桌面.exe');
 const resultName = installed ? 'installed' : packaged ? 'packaged' : 'source';
 let instance, page;
@@ -107,25 +108,51 @@ const inspectShortcutDialog = async (mode, fullscreen, theater) => {
   check(mode + 'Esc 只关闭快捷键面板', await page.locator('.player-page').count() === 1 && (await geometry()).fullscreen === fullscreen && (await page.locator('.player-theater').count() > 0) === theater);
   return entries;
 };
+const focusSeek=async()=>{
+  await hover();
+  if(!await page.locator('video[data-active=true]').evaluate(video=>video.paused))await page.getByTitle('暂停（空格）').click();
+  const timeline=page.getByLabel('播放进度'),bounds=await timeline.boundingBox();
+  const seekState=()=>timeline.evaluate(input=>{const video=document.querySelector('video[data-active=true]'),style=getComputedStyle(input);return{time:video.currentTime,paused:video.paused,focused:document.activeElement===input,focusVisible:input.matches(':focus-visible'),outlineStyle:style.outlineStyle,outlineWidth:style.outlineWidth,outlineColor:style.outlineColor};});
+  const settled=()=>page.waitForFunction(()=>{const video=document.querySelector('video[data-active=true]');return video.paused&&!video.seeking&&Math.abs(video.currentTime-Number(document.querySelector('input[aria-label=播放进度]').value))<.05;});
+  await timeline.click({position:{x:bounds.width*.4,y:bounds.height/2}});await settled();
+  const pointer=await seekState();await page.keyboard.press('ArrowRight');await settled();const arrow=await seekState();
+  await page.screenshot({path:path.join(out,`${resultName}-pointer-seek-focus.png`)});
+  check('鼠标定位后方向键快进五秒，进度条不残留白框或焦点',!pointer.focused&&Math.abs(arrow.time-pointer.time-5)<.05&&!arrow.focused&&Number.parseFloat(arrow.outlineWidth)===0,{before:pointer,after:arrow,seekDelta:arrow.time-pointer.time});
+  await timeline.focus();const keyboard=await seekState();await page.keyboard.press('ArrowRight');await settled();const fine=await seekState();
+  await page.screenshot({path:path.join(out,`${resultName}-keyboard-seek-focus.png`)});
+  check('键盘主动聚焦保留原生微调，但不画进度条长白框',fine.focused&&fine.focusVisible&&fine.time-keyboard.time>.05&&fine.time-keyboard.time<.2&&Number.parseFloat(fine.outlineWidth)===0,{before:keyboard,after:fine,seekDelta:fine.time-keyboard.time});
+  await timeline.click({position:{x:bounds.width*.4,y:bounds.height/2}});await settled();const shifted=await seekState();
+  await page.keyboard.press('Shift+ArrowRight');await settled();const afterShift=await seekState();
+  check('鼠标定位后Shift方向键仍只快进一秒',!afterShift.focused&&Math.abs(afterShift.time-shifted.time-1)<.05,{seekDelta:afterShift.time-shifted.time});
+  await page.mouse.move(bounds.x+bounds.width*.3,bounds.y+bounds.height/2);await page.mouse.down();await page.mouse.move(bounds.x+bounds.width*.6,bounds.y+bounds.height/2,{steps:5});await page.mouse.up();await settled();
+  const drag=await seekState();await page.keyboard.press('ArrowRight');await settled();const afterDrag=await seekState();
+  check('拖动释放后方向键仍快进五秒，不被滑块截走',!drag.focused&&Math.abs(afterDrag.time-drag.time-5)<.05,{before:drag,after:afterDrag,seekDelta:afterDrag.time-drag.time});
+  const volume=page.getByLabel('音量'),volumeBefore=Number(await volume.inputValue()),timeBefore=(await seekState()).time;await volume.focus();await page.keyboard.press('ArrowRight');
+  await page.waitForFunction(before=>Number(document.querySelector('input[aria-label=音量]').value)>before,volumeBefore);
+  check('音量滑块保留原生方向键，不触发视频快进',Math.abs((await seekState()).time-timeBefore)<.05&&Number(await volume.inputValue())>volumeBefore);
+};
 try {
-  instance = await electron.launch({ ...(installed || packaged ? { executablePath: installed ? path.join(process.env.LOCALAPPDATA, 'Programs/hongguo-desktop/红果桌面.exe') : packagedPath, args: [] } : { args: ['.'], cwd: root }), env: { ...process.env, HG_TEST_DATA_DIR: path.join(out, installed ? 'installed-profile' : packaged ? 'packaged-profile' : 'profile'), HG_TEST_BACKGROUND: '1', TEMP: out, TMP: out }, timeout: 60000 });
+  instance = await electron.launch({ ...(installed || packaged ? { executablePath: installed ? process.env.HG_QA_EXECUTABLE||path.join(process.env.LOCALAPPDATA, 'Programs/hongguo-desktop/红果桌面.exe') : packagedPath, args: [] } : { args: ['.'], cwd: root }), env: { ...process.env, HG_TEST_DATA_DIR: path.join(out, installed ? 'installed-profile' : packaged ? 'packaged-profile' : 'profile'), HG_TEST_BACKGROUND: '1', TEMP: out, TMP: out }, timeout: 60000 });
   page = await instance.firstWindow();
   page.on('pageerror', error => errors.push(error.name));
   await instance.evaluate(({ ipcMain }, url) => {
     let session = 0;
     const series = { id: '9999999999999999991', title: '窗口全屏演示', cover: '', intro: '本地布局回归画面', totalEpisodes: 80, tags: [], actors: [] };
     ipcMain.removeHandler('api:request');
-    ipcMain.handle('api:request', (_event, route, options = {}) => {
+    const fixtureRequest=(route, options = {}) => {
       if (route === '/account/session') return { loggedIn: false, uid: '', nickname: '', avatar: '', mobile: '' };
       if (route === '/catalog/series/' + series.id) return { series, episodes: Array.from({ length: 80 }, (_, index) => ({ index: index + 1, vid: '9999999999999999992', title: `第 ${index + 1} 集`, duration: 120 })).filter(episode => episode.index !== 2) };
       if (route.includes('/seasons')) return { seriesId: series.id, status: 'single', currentSeason: 1, seasons: [], complete: true };
       if (route.startsWith('/catalog/comments')) return { items: [], total: 0, cursor: 0, hasMore: false };
       if (route.startsWith('/catalog/danmaku')) return { items: [], start: 0, end: 120, hasMore: false, seriesId: series.id, vid: '9999999999999999992', source: 'mobile' };
       if (route.startsWith('/catalog/')) return { items: [series], hasMore: false, cursor: null };
-      if (route.startsWith('/media/session')) return options.method === 'DELETE' ? {} : { id: 'layout-' + ++session, phase: 'complete', url, duration: 120 };
+      if (route.startsWith('/media/session')) return options.method === 'DELETE' ? {} : { id: route==='/media/session'?'layout-'+ ++session:route.split('/').at(-1), phase: 'complete', url, duration: 120 };
       if (route === '/media/cache/settings') return {};
       throw new Error('未预期的布局回归请求');
-    });
+    };
+    ipcMain.handle('api:request',(_event,route,options)=>fixtureRequest(route,options));
+    ipcMain.removeHandler('media:request');
+    ipcMain.handle('media:request',(_event,route,options)=>({ok:true,data:fixtureRequest(route,options)}));
   }, mediaUrl);
   await page.waitForSelector('.app-shell');
   await page.evaluate(() => window.hongguo.saveSettings({ autoplay: false, rate: 1, volume: 0, danmaku: { enabled: false } }));
@@ -137,6 +164,8 @@ try {
   await page.getByRole('dialog').getByRole('button', { name: '播放第 1 集', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('video[data-active=true]')?.currentTime > .2, undefined, { timeout: 30000 });
   await page.evaluate(() => { window.__layoutVideo = document.querySelector('video[data-active=true]'); });
+  if(focusOnly){await hover();await windowButton().click();await page.waitForTimeout(200);await focusSeek();}
+  else{
   const normal = await geometry();
   const bounds = await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds());
   await hover(); await windowButton().click();
@@ -215,6 +244,22 @@ try {
   await hover(); await page.getByTitle('评论', { exact: true }).click();
   check('窗口全屏评论面板位于软件范围内', await page.locator('.comments-panel').evaluate(node => { const r = node.getBoundingClientRect(); return r.top === 0 && r.bottom <= innerHeight + 1 && r.right <= innerWidth + 1; }));
   await page.getByLabel('关闭评论', { exact: true }).click();
+  const normalBounds = await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getNormalBounds());
+  await hover(); await page.getByTitle('画中画置顶小窗', { exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.player-pip'));
+  await page.waitForTimeout(350);
+  const pipState = await instance.evaluate(({ BrowserWindow, screen }) => { const w = BrowserWindow.getAllWindows()[0]; return { always: w.isAlwaysOnTop(), bounds: w.getBounds(), normal: w.getNormalBounds(), maximized: w.isMaximized(), work: screen.getPrimaryDisplay().workArea }; });
+  const expectedPipWidth = Math.min(480, pipState.work.width - 24);
+  check('画中画窗口置顶且缩小到右下角', pipState.always && !pipState.maximized && Math.abs(pipState.bounds.width - expectedPipWidth) < 2 && Math.abs(pipState.bounds.height - Math.round(expectedPipWidth * 9 / 16)) < 2 && pipState.bounds.x + pipState.bounds.width <= pipState.work.x + pipState.work.width + 1 && pipState.bounds.y + pipState.bounds.height <= pipState.work.y + pipState.work.height + 1, pipState);
+  check('画中画期间播放保持且画面仍在解码', await page.locator('video[data-active=true]').evaluate(v => v.videoWidth > 0 && !v.paused));
+  await page.locator('video[data-active=true]').evaluate(v => v.pause());
+  const pipPaused = await page.locator('video[data-active=true]').evaluate(v => v.paused);
+  await hover(); await page.getByTitle('退出置顶小窗', { exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('.player-pip'));
+  await page.waitForTimeout(350);
+  const restored = await instance.evaluate(({ BrowserWindow }) => { const w = BrowserWindow.getAllWindows()[0]; return { always: w.isAlwaysOnTop(), bounds: w.getNormalBounds(), max: w.isMaximized() }; });
+  check('退出画中画恢复原窗口尺寸且取消置顶', !restored.always && Math.abs(restored.bounds.width - normalBounds.width) < 2 && Math.abs(restored.bounds.height - normalBounds.height) < 2 && Math.abs(restored.bounds.x - normalBounds.x) < 2 && Math.abs(restored.bounds.y - normalBounds.y) < 2, { before: normalBounds, after: restored });
+  await page.locator('video[data-active=true]').evaluate(v => { if (!v.paused) v.play(); });
   await page.keyboard.press('f'); await page.waitForFunction(() => !!document.fullscreenElement);
   check('窗口全屏可以继续进入系统全屏', await page.locator('.playback-layout').evaluate(node => document.fullscreenElement === node));
   check('系统全屏不保留窗口拖动区', !await page.locator('.window-drag-region').isVisible() && await nativeHit(200, 16) === 1);
@@ -262,12 +307,13 @@ try {
   await page.locator('.header-settings').click();
   const settingsEntries = await page.locator('.player-shortcut-list').getByRole('listitem').allTextContents();
   check('设置和播放器快捷键表一致', JSON.stringify(settingsEntries) === JSON.stringify(shortcutEntries));
+  }
   check('无渲染异常且窗口静音', errors.length === 0 && await instance.evaluate(({ webContents }) => webContents.getAllWebContents().every(contents => contents.isAudioMuted())), { errors });
 } catch (error) {
   checks.push({ name: '窗口全屏回归', ok: false, error: error.name, message: error.message.slice(0, 200) });
   console.error(error.name + ': ' + error.message.slice(0, 200)); process.exitCode = 1;
 } finally {
-  await writeFile(path.join(out, installed ? 'installed-result.json' : packaged ? 'packaged-result.json' : 'result.json'), JSON.stringify({ checks, errors }, null, 2));
+  await writeFile(path.join(out, focusOnly?`focus-${resultName}-result.json`:installed ? 'installed-result.json' : packaged ? 'packaged-result.json' : 'result.json'), JSON.stringify({ checks, errors }, null, 2));
   if (instance) { await instance.evaluate(({ app }) => app.quit()).catch(() => {}); await instance.close().catch(() => {}); }
   await new Promise(resolve => server.close(resolve));
 }

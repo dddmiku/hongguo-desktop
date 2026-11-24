@@ -36,5 +36,7 @@ describe('sealed playback completion',()=>{
     guard.inspect(sample);expect(guard.inspect({...sample,now:wait-1})).toBe(false);
     expect(guard.inspect({...sample,now:wait})).toBe(true);
   });
+  it('an ended sealed tail completes even while paused, because the ended event can land inside an automatic-switch commit window',()=>{const guard=new PlaybackEnd();expect(guard.inspect(state({ended:true,playing:false}))).toBe(true);expect(guard.claim('episode-150')).toBe(true);});
+  it('a seeking element never turns into completion, even when it reports ended',()=>{const guard=new PlaybackEnd();expect(guard.inspect(state({ended:true,playing:false,seeking:true}))).toBe(false);expect(guard.inspect(state({ended:true,playing:false,seeking:true,now:30000}))).toBe(false);});
   it('ended and fallback share a single transition per session; a new session can finish again',()=>{const guard=new PlaybackEnd();expect(guard.claim('episode-150')).toBe(true);expect(guard.claim('episode-150')).toBe(false);expect(guard.inspect(state({now:5000}))).toBe(false);expect(guard.inspect(state({id:'episode-151'}))).toBe(false);expect(guard.inspect(state({id:'episode-151',now:1000}))).toBe(true);expect(guard.claim('episode-151')).toBe(true);});
 });

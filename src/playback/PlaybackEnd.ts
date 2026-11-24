@@ -16,6 +16,8 @@ export class PlaybackEnd {
     if(this.completed)return false;
     const tail=Math.min(state.duration,state.bufferedEnd);
     const atTail=state.sealed&&tail>0&&state.duration-tail<=.4&&tail-state.time<=.3&&state.time<=state.duration+.1;
+    // A sealed tail whose element already ended completes even while paused: the ended event can be swallowed during an automatic-switch commit window.
+    if(state.ended&&!state.seeking&&atTail)return true;
     if(!state.enabled||!state.playing||state.seeking||!Number.isFinite(state.time)||!atTail){this.time=state.time;this.since=state.now;return false;}
     if(state.ended)return true;
     if(Math.abs(state.time-this.time)>.000001){this.time=state.time;this.since=state.now;return false;}

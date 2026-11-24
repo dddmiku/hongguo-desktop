@@ -116,7 +116,7 @@ export default function App() {
   const playerLibrary = useCallback(() => { void refreshLibrary().catch(e => notify(message(e))); }, [refreshLibrary, notify]);
   const playerSeries = useCallback((value:SeriesDetail)=>setPlay(previous=>previous?{...previous,detail:value}:previous),[]);
   const playerSettings = useCallback((patch: Partial<Preferences>) => { void saveSettings(patch).catch(e => notify(message(e))); }, [saveSettings, notify]);
-  const closePlayer = useCallback(() => { setPlay(null); setPlayVisible(false); void refreshLibrary().catch(e => notify(message(e))); }, [refreshLibrary, notify]);
+  const closePlayer = useCallback(() => {clearTimeout(preloadTimer.current);mediaPreload(window.hongguo).clear();setPlay(null);setPlayVisible(false);void refreshLibrary().catch(e=>notify(message(e)));}, [refreshLibrary, notify]);
   const sync = useCallback(async () => {
     if (syncing) return;
     const identity = account.current;

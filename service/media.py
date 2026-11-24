@@ -583,7 +583,8 @@ def mount_media(app, manager):
         except (ValueError, TypeError, OverflowError) as error:
             raise HTTPException(400, str(error)) from None
         except MediaBusy as error:
-            raise HTTPException(429, str(error), headers={"Retry-After": "1"}) from None
+            raise HTTPException(429, {"error": {"code": "MEDIA_BUSY", "message": str(error)}},
+                                headers={"Retry-After": "1"}) from None
 
     @app.get("/media/session/{identifier}")
     def get_session(identifier: str, request: Request):

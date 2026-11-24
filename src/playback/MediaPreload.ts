@@ -2,9 +2,10 @@ import type {MediaSession,NativeBridge} from '../../shared/contracts';
 import type {PlaybackTarget} from './SeamlessSwitcher';
 import {hardwareHevc} from './capabilities';
 import {requestMedia,type MediaRequestTransport} from '../../shared/media-request';
-type Entry={target:PlaybackTarget;promise:Promise<MediaSession>;session?:MediaSession;cancelled:boolean;claimed:boolean;timer?:ReturnType<typeof setTimeout>};
+type Entry={target:PlaybackTarget;owner?:object;promise:Promise<MediaSession>;session?:MediaSession;cancelled:boolean;claimed:boolean;timer?:ReturnType<typeof setTimeout>};
 type MediaTransport=MediaRequestTransport;
-const same=(a:PlaybackTarget,b:PlaybackTarget)=>a.seriesId===b.seriesId&&a.episode===b.episode&&a.quality===b.quality&&!!a.compatible===!!b.compatible&&Math.abs(a.start-b.start)<.1;
+// The service prepares the full episode from zero. Seeking does not change the source job.
+const same=(a:PlaybackTarget,b:PlaybackTarget)=>a.seriesId===b.seriesId&&a.episode===b.episode&&a.quality===b.quality&&!!a.compatible===!!b.compatible;
 const aborted=()=>new DOMException('Preparation cancelled','AbortError');
 
 /** One short-lived source lease, handed to the real decoder instead of starting duplicate work. */
@@ -15,10 +16,10 @@ export class MediaPreload {
     entry.cancelled=true;clearTimeout(entry.timer);
     if(entry.session&&!entry.claimed){const id=entry.session.id;entry.session=undefined;void requestMedia(this.bridge,`/media/session/${id}`,{method:'DELETE'}).catch(()=>{});}
   }
-  prepare(target:PlaybackTarget){
-    if(this.entry&&same(this.entry.target,target))return;
+  prepare(target:PlaybackTarget,owner?:object){
+    if(this.entry&&same(this.entry.target,target)){this.entry.owner=owner;this.entry.target={...target};return;}
     this.clear();
-    const entry:Entry={target:{...target},promise:undefined as unknown as Promise<MediaSession>,cancelled:false,claimed:false};
+    const entry:Entry={target:{...target},owner,promise:undefined as unknown as Promise<MediaSession>,cancelled:false,claimed:false};
     this.entry=entry;
     entry.promise=Promise.resolve().then(async()=>{
       const acceptHevc=!target.compatible&&await this.capability();
@@ -36,7 +37,7 @@ export class MediaPreload {
     const entry=this.entry;if(!entry||entry.cancelled||!same(entry.target,target))return null;
     this.entry=null;entry.claimed=true;clearTimeout(entry.timer);return entry.promise;
   }
-  clear(){const entry=this.entry;this.entry=null;if(entry)this.release(entry);}
+  clear(owner?:object){const entry=this.entry;if(!entry||owner!==undefined&&entry.owner!==owner)return;this.entry=null;this.release(entry);}
 }
 const instances=new WeakMap<NativeBridge,MediaPreload>();
 export function mediaPreload(bridge:NativeBridge){let value=instances.get(bridge);if(!value){value=new MediaPreload(bridge);instances.set(bridge,value);}return value;}

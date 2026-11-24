@@ -1,5 +1,21 @@
 # 左右方向键定位与控制栏验收
 
+## 1.5.10 快进片尾自动切集修复
+
+2026-11-25 用户反馈：快进到片尾后偶发不自动切下一集，需要快退一步才恢复。根因是自动切集提交后的短暂提交窗口内到达的 ended 事件被丢弃，且 PlaybackEnd 恢复判定要求播放态，元素 ended 后必然暂停，两者叠加导致完成判定永远不成立。
+
+修复：finishEpisode 允许本集切换中的完成通过提交窗口；PlaybackEnd 对已封口且已 ended 的片尾不再要求播放态，拖动定位中（seeking）仍不触发。
+
+验证：npx vitest run 394 项通过（含 PlaybackEnd ended-paused 与 seeking 保护新回归）；python tools/run-service-tests.py 385 项通过；npx tsc --noEmit 通过；真实打包版与安装版 tools/qa-tail-autoswitch.mjs 通过（快进到片尾后无需人工干预切到第 2 集）；安装版 qa-window-fullscreen --focus-only 6 项通过；1.5.10 覆盖安装后账号、设备字节、历史 1659、收藏 7、设置全部保留，安装文件与包内哈希一致。
+
+## 1.5.9 鼠标残留焦点补充
+
+2026-11-25 在原安装版 1.5.8 复现：鼠标点击进度条后输入框保留焦点，接着按右方向键只移动 0.1 秒，并命中 `:focus-visible` 的 2px 白色轮廓。
+
+进度条现在在 pointerup/pointercancel 时释放焦点，不影响拖动过程。键盘主动聚焦仍保留原生微调；进度条焦点改为拇指光晕，按钮、音量及其它控件的键盘行为不变。
+
+专项反馈命令：`node tools/qa-window-fullscreen.mjs --focus-only`。它核对真实视频定位、鼠标点击后 5 秒快进、Shift 1 秒快进、拖动后快进、键盘精调和音量滑块，不以自然播放推进或简单 DOM 变化判定成功。
+
 验证日期：2026-11-19；应用版本：1.4.7；Windows 10 x64。
 
 ## 原因与修复

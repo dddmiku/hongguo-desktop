@@ -10,6 +10,7 @@ import {playbackBufferConfig} from './BufferBudget';
 import {PlaybackRecovery} from './PlaybackRecovery';
 import {MediaReconnectCoordinator} from './MediaReconnectCoordinator';
 import {PlaybackTrace} from './PlaybackTrace';
+import {isRetryableMediaRequestError} from '../../shared/media-request';
 import type {PlaybackTraceAction,PlaybackTraceReason} from '../../shared/playback-diagnostics';
 
 export interface VideoDeck extends PreparedDeck { video: HTMLVideoElement; hls: Hls | null; sessionId: string; duration: number; sealed: boolean; suspendPlayback:()=>void; resumePlayback:(position:number)=>void; }
@@ -80,7 +81,15 @@ export class HlsDeckLoader {
       acceptHevc = !target.compatible && await hardwareHevc();
       if (signal.aborted || released) throw aborted();
       lease=new MediaSessionLease(this.bridge,{seriesId:target.seriesId,episode:target.episode,quality:target.quality,start:target.start,...(acceptHevc?{acceptHevc:true}:{})},signal);
-      const session=await lease.open(mediaPreload(this.bridge).claim(target)??undefined);
+      let session:MediaSession;
+      try{session=await lease.open(mediaPreload(this.bridge).claim(target)??undefined);}
+      catch(error){
+        if(signal.aborted||released)throw aborted();
+        if(!(error instanceof MediaSessionRecoveryError)&&!isRetryableMediaRequestError(error))throw error;
+        this.onPreparing(target,'正在等待片源连接恢复，稍后自动重试');
+        // Startup shares the existing cancellable, foreground-bounded recovery policy.
+        session=await recoveryCoordinator.run(()=>lease!.reconnect(target.start));
+      }
       usingHevc=acceptHevc&&session.videoCodec?.toLowerCase()==='hevc';
       sessionId = session.id; deck.sessionId = session.id;
       leaseGeneration++;record('ready');

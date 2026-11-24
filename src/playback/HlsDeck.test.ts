@@ -30,6 +30,60 @@ import { HlsDeckLoader } from './HlsDeck';
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.mocked(hardwareHevc).mockReset().mockResolvedValue(false); (Hls as any).instances = []; });
 
 describe('播放会话异步取消', () => {
+  const startupVideo=()=>{
+    let frames=0;
+    vi.stubGlobal('HTMLMediaElement',{HAVE_METADATA:1,HAVE_CURRENT_DATA:2});
+    return {
+      readyState:2,videoWidth:1920,duration:80,currentTime:23.75,paused:false,ended:false,
+      buffered:{length:0},style:{visibility:''},muted:false,volume:1,
+      pause:vi.fn(),load:vi.fn(),removeAttribute:vi.fn(),addEventListener:vi.fn(),removeEventListener:vi.fn(),play:vi.fn(async()=>{}),
+      requestVideoFrameCallback:vi.fn((callback:(...args:any[])=>void)=>{if(++frames===1)queueMicrotask(()=>callback());return frames;}),cancelVideoFrameCallback:vi.fn(),
+    } as unknown as HTMLVideoElement;
+  };
+  const startupTarget={seriesId:'12345678',episode:175,quality:'1080p',start:23.75,compatible:true};
+  const busy=()=>({ok:false,error:{kind:'http',code:'MEDIA_BUSY',message:'上一任务正在结束，请稍后重试',status:429,retryable:true}});
+  it('first POST throttled while a cancelled job finishes recovers without a retry click',async()=>{
+    vi.useFakeTimers();vi.stubGlobal('performance',{now:()=>Date.now()});let posts=0;
+    const request=vi.fn(async(_route:string,options?:{method?:string})=>{
+      if(options?.method==='POST')return ++posts<=2?busy():{ok:true,data:{id:'startup-ready',phase:'complete',url:'/media/startup.m3u8',duration:80,videoCodec:'h264'}};
+      return {ok:true,data:{}};
+    });
+    const fatal=vi.fn(),loader=new HlsDeckLoader([startupVideo()],{mediaRequestResult:request} as unknown as NativeBridge,fatal),abort=new AbortController();
+    const observed=loader.prepare(0,startupTarget,abort.signal).then(deck=>({deck,error:undefined}),error=>({deck:undefined,error}));
+    try{
+      await vi.advanceTimersByTimeAsync(1000);expect(posts).toBe(3);expect((Hls as any).instances).toHaveLength(1);
+      (Hls as any).instances[0].emit((Hls as any).Events.MANIFEST_PARSED);
+      const result=await observed;expect(result.error).toBeUndefined();expect(result.deck?.sessionId).toBe('startup-ready');expect(fatal).not.toHaveBeenCalled();result.deck?.release();
+    }finally{abort.abort();await observed;}
+  });
+  it.each([401,403,404])('first POST HTTP %s remains terminal, not a hidden retry',async status=>{
+    const request=vi.fn(async()=>({ok:false,error:{kind:'http',code:'MEDIA_DENIED',message:'固定请求失败',status,retryable:false}}));
+    const loader=new HlsDeckLoader([startupVideo()],{mediaRequestResult:request} as unknown as NativeBridge,vi.fn());
+    await expect(loader.prepare(0,startupTarget,new AbortController().signal)).rejects.toThrow('固定请求失败');expect(request).toHaveBeenCalledOnce();expect((Hls as any).instances).toHaveLength(0);
+  });
+  it('malformed successful startup DTO remains terminal, not a hidden retry',async()=>{
+    const request=vi.fn(async()=>({ok:true})),loader=new HlsDeckLoader([startupVideo()],{mediaRequestResult:request} as unknown as NativeBridge,vi.fn());
+    await expect(loader.prepare(0,startupTarget,new AbortController().signal)).rejects.toThrow('媒体服务返回格式异常');expect(request).toHaveBeenCalledOnce();expect((Hls as any).instances).toHaveLength(0);
+  });
+  it('initial throttling has a bounded budget and leaves no retries running after failure',async()=>{
+    vi.useFakeTimers();vi.stubGlobal('performance',{now:()=>Date.now()});let posts=0;
+    const request=vi.fn(async(_route:string,options?:{method?:string})=>{if(options?.method==='POST')posts++;return busy();});
+    const loader=new HlsDeckLoader([startupVideo()],{mediaRequestResult:request} as unknown as NativeBridge,vi.fn()),abort=new AbortController(),timers=vi.getTimerCount();
+    const observed=loader.prepare(0,startupTarget,abort.signal).then(()=>undefined,error=>error);
+    try{
+      await vi.advanceTimersByTimeAsync(65000);expect((await observed).message).toBe('播放连接暂时不可用，请重试当前集');
+      expect(posts).toBeGreaterThan(2);expect(posts).toBeLessThanOrEqual(13);const finished=posts;
+      await vi.advanceTimersByTimeAsync(120000);expect(posts).toBe(finished);expect(vi.getTimerCount()).toBe(timers);
+    }finally{abort.abort();await observed;}
+  });
+  it('leaving during initial throttling cancels its retry budget',async()=>{
+    vi.useFakeTimers();let posts=0;
+    const request=vi.fn(async(_route:string,options?:{method?:string})=>{if(options?.method==='POST')posts++;return busy();});
+    const loader=new HlsDeckLoader([startupVideo()],{mediaRequestResult:request} as unknown as NativeBridge,vi.fn()),abort=new AbortController();
+    const observed=loader.prepare(0,startupTarget,abort.signal).then(()=>undefined,error=>error);
+    await vi.advanceTimersByTimeAsync(0);expect(posts).toBe(2);abort.abort();expect((await observed).name).toBe('AbortError');
+    const cancelled=posts;await vi.advanceTimersByTimeAsync(120000);expect(posts).toBe(cancelled);
+  });
   it.each(['fatal-network','silent-empty-buffer'])('ready replacement without decoded health remains recoverable: %s',async(kind)=>{
     vi.useFakeTimers();
     let frameRequests=0,posts=0;

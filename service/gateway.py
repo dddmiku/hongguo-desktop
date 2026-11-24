@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -222,7 +223,14 @@ class TcpRow(ctypes.Structure):
 
 
 def owned_listener(pid):
-    """Read Windows TCP owner table, so an unrelated fixed port is never reused."""
+    """Read Windows TCP owner table, so an unrelated fixed port is never reused.
+
+    TCP_TABLE_OWNER_PID_LISTENER rows are listener sockets by definition, but
+    Windows 11 26H2 (build 26300+) reports unreliable dwState values (0 or 1
+    observed for live listeners; see GitHub issue #1). Matching relies on the
+    PID and the loopback address only; a wrong port claim is still caught by
+    the readiness probe below.
+    """
     library = ctypes.WinDLL("iphlpapi.dll", winmode=0x00000800)
     query = library.GetExtendedTcpTable
     query.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_int,
@@ -246,7 +254,7 @@ def owned_listener(pid):
         ports = []
         for index in range(count):
             row = TcpRow.from_buffer_copy(buffer, 4 + index * stride)
-            if row.pid == pid and row.state == 2:
+            if row.pid == pid:
                 address = socket.inet_ntoa(struct.pack("=I", row.address))
                 if address != "127.0.0.1":
                     raise RuntimeError("Signer must bind loopback")
@@ -293,9 +301,18 @@ class OwnedSigner:
         while time.monotonic() < deadline and not stop.is_set():
             if self.process.poll() is not None:
                 raise RuntimeError("Signing process exited")
-            port = owned_listener(self.process.pid) if os.name == "nt" else self.stdout_port
+            # Windows 11 26H2 may report dwState 0/1 for live listeners; the
+            # table stays authoritative for loopback validation when it works,
+            # and the signer's own SIGNER_READY port is the fallback (issue #1).
+            port = (owned_listener(self.process.pid) or self.stdout_port) if os.name == "nt" else self.stdout_port
             if port:
-                return f"http://127.0.0.1:{port}"
+                candidate = f"http://127.0.0.1:{port}"
+                try:
+                    with urllib.request.urlopen(candidate + "/health", timeout=2) as response:
+                        if response.status == 200:
+                            return candidate
+                except Exception:
+                    pass
             stop.wait(.05)
         raise RuntimeError("Signing startup was interrupted or timed out")
 
@@ -337,7 +354,10 @@ def main():
 
     def parent_watch():
         try:
-            while sys.stdin.buffer.read(1):
+            # Raw os.read keeps interpreter shutdown lock-free: a buffered
+            # reader held by this daemon thread crashed finalization with
+            # _enter_buffered_busy and surfaced as 0xC0000005 (issue #1/#3).
+            while os.read(0, 1):
                 pass
         finally:
             stop.set()

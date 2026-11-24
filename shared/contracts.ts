@@ -33,7 +33,7 @@ export interface NativeBridge {
   setOnline(online:boolean):Promise<void>;
   setLibraryView(active:boolean):Promise<void>;
   recordPlaybackDiagnostics(snapshot:PlaybackTraceSnapshot):Promise<void>;
-  window(action: 'minimize' | 'maximize' | 'close' | 'quit' | 'fullscreen' | 'exitfullscreen'): Promise<void | boolean>;
+  window(action: 'minimize' | 'maximize' | 'close' | 'quit' | 'fullscreen' | 'exitfullscreen' | 'pip' | 'exitpip'): Promise<void | boolean>;
   openExternal(url: string): Promise<void>; exportDiagnostics(): Promise<string>;
   checkUpdate(): Promise<UpdateInfo>; downloadUpdate(info: UpdateInfo): Promise<void>;
   onUpdate(callback: (task: UpdateTask) => void): () => void;
