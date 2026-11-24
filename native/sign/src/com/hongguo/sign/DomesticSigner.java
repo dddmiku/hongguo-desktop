@@ -26,12 +26,15 @@ import java.nio.file.Files;
  * 红果(com.phoenix.read)metasec 脱机签名 —— 移植 zero199901/fqnovel-unidbg(IdleFQ)适配红果。
  * Uses the registered JNI dispatcher and current SDK opcodes; no direct function offsets.
  */
-public class DomesticSigner extends AbstractJni implements IOResolver<AndroidFileIO> {
+public class DomesticSigner extends AbstractJni implements IOResolver<AndroidFileIO>, AutoCloseable {
 
     static final String PKG = "com.phoenix.read";
     private String version = "7.4.3.32";
     private int versionCode = 74332;
-    private long managerId;      // 对齐设备实际版本(.msp hash 含 versionCode)
+    private volatile long httpManagerId;
+    private volatile boolean httpManagerCallbackSeen;
+    private final HttpAbiRuntimeContract.CallbackState httpCallbacks = new HttpAbiRuntimeContract.CallbackState();
+    private volatile long managerId;      // 对齐设备实际版本(.msp hash 含 versionCode)
     static final String FILES = "/data/user/0/com.phoenix.read/files";
     private final AndroidEmulator emulator;
     private final VM vm;
@@ -67,23 +70,25 @@ public class DomesticSigner extends AbstractJni implements IOResolver<AndroidFil
 
         if (soCpp != null && soCpp.exists()) vm.loadLibrary(soCpp, false);
 
-        // 类链(番茄海外:m ← a4$a ← MS);红果若不同,FindClass 日志会暴露真实名
-        DvmClass m = vm.resolveClass("ms/bd/c/m");
-        DvmClass a4a = vm.resolveClass("ms/bd/c/a4$a", m);
-        vm.resolveClass("com/bytedance/mobsec/metasec/ml/MS", a4a);
+        // Current 74332 facade: MS -> q2 -> k3 -> Object; native a is registered on k3.
+        DvmClass dispatcher = vm.resolveClass(HttpAbiRuntimeContract.DISPATCHER_CLASS);
+        DvmClass facadeParent = vm.resolveClass(HttpAbiRuntimeContract.FACADE_PARENT_CLASS, dispatcher);
+        vm.resolveClass(HttpAbiRuntimeContract.FACADE_CLASS, facadeParent);
 
         DalvikModule dm = vm.loadLibrary(soMeta, true);
         module = dm.getModule();
         dm.callJNI_OnLoad(emulator);
-        System.out.println("[*] JNI_OnLoad 完成 base=0x" + Long.toHexString(module.base));
 
     }
 
-    private DvmObject<?> handleMS(BaseVM vm, int op) {
-        System.out.println("  [MS.b op=" + op + " 0x" + Integer.toHexString(op) + "]");
+    private DvmObject<?> handleMS(BaseVM vm, int op, long callbackLong) {
         switch (op) {
             case 65539:    return new StringObject(vm, FILES + "/.msdata");
             case 33554433:
+                httpCallbacks.acceptOpcode(op, callbackLong);
+                httpManagerId = callbackLong;
+                httpManagerCallbackSeen = true;
+                return DvmBoolean.valueOf(vm, true);
             case 33554434: return DvmBoolean.valueOf(vm, true);
             case 16777232: return vm.resolveClass("java/lang/Integer").newObject(versionCode); // 红果 versionCode(7.2.5.32)
             case 16777233: return new StringObject(vm, version);
@@ -92,20 +97,18 @@ public class DomesticSigner extends AbstractJni implements IOResolver<AndroidFil
                     if (certFile != null && certFile.exists())
                         return new ByteArray(vm, Files.readAllBytes(certFile.toPath()));
                 } catch (Exception e) {}
-                System.out.println("    [MS.b op=16777218 证书] 暂无,返回 null");
                 return null;
             case 268435470: return vm.resolveClass("java/lang/Long").newObject(2L);
             case 268435471: return vm.resolveClass("java/lang/Long").newObject(0L);
             default:
-                System.out.println("    [MS.b 未处理 op=" + op + " 0x" + Integer.toHexString(op) + "]");
                 return null;
         }
     }
 
     @Override
     public DvmObject<?> callStaticObjectMethodV(BaseVM vm, DvmClass c, String sig, VaList va) {
-        if (sig.equals("com/bytedance/mobsec/metasec/ml/MS->b(IIJLjava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;"))
-            return handleMS(vm, va.getIntArg(0));
+        if (HttpAbiRuntimeContract.isFacadeCallback(sig))
+            return handleMS(vm, va.getIntArg(0), va.getLongArg(2));
         if (sig.equals("java/lang/Thread->currentThread()Ljava/lang/Thread;"))
             return vm.resolveClass("java/lang/Thread").newObject(Thread.currentThread());
         if (sig.equals("java/lang/Boolean->valueOf(Z)Ljava/lang/Boolean;"))
@@ -173,8 +176,7 @@ public class DomesticSigner extends AbstractJni implements IOResolver<AndroidFil
     public FileResult resolve(Emulator emu, String pathname, int oflags) {
         if (pathname.contains("libmetasec_ml.so"))
             return FileResult.success(new SimpleFileIO(oflags, soMeta, pathname));
-        if (pathname.startsWith(FILESDIR) || pathname.contains(".ms") || pathname.contains("msdata"))
-            System.out.println("  [resolve] " + pathname + " oflags=0x" + Integer.toHexString(oflags));
+        // Prototype path diagnostics are intentionally disabled.
         // 映射 metasec 状态目录: /data/.../files/... -> ../capture/msstate/...
         if (pathname.startsWith(FILESDIR)) {
             String rel = pathname.substring(FILESDIR.length());
@@ -196,49 +198,77 @@ public class DomesticSigner extends AbstractJni implements IOResolver<AndroidFil
 
 
 
+    @Override
+    public void callVoidMethodV(BaseVM vm, DvmObject<?> object, String sig, VaList va) {
+        if ("ms/bd/c/a3->b(J)V".equals(sig) &&
+                "ms/bd/c/h5".equals(object.getObjectType().getClassName())) {
+            httpCallbacks.noteExactSetter(sig,object.getObjectType().getClassName());
+            return;
+        }
+        super.callVoidMethodV(vm, object, sig, va);
+    }
+
+
+
     private DvmObject<?> dispatch(int op, int option, long manager, String value, DvmObject<?> object) {
-        return vm.resolveClass("ms/bd/c/m").callStaticJniMethodObject(emulator,
+        return vm.resolveClass(HttpAbiRuntimeContract.DISPATCHER_CLASS).callStaticJniMethodObject(emulator,
             "a(IIJLjava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;",
             op, option, manager, value==null?null:new StringObject(vm,value), object);
     }
 
     private void initialize(com.alibaba.fastjson.JSONArray seed, String url) throws Exception {
-        java.util.Map<String,String> query=new java.util.HashMap<>();
-        String raw=new java.net.URI(url).getRawQuery();
-        if(raw!=null)for(String entry:raw.split("&")){
-            String[] pair=entry.split("=",2);
-            if(pair.length==2)query.put(java.net.URLDecoder.decode(pair[0],"UTF-8"),java.net.URLDecoder.decode(pair[1],"UTF-8"));
-        }
-        version=query.getOrDefault("version_name",version);
-        try{versionCode=Integer.parseInt(query.getOrDefault("version_code",String.valueOf(versionCode)));}catch(NumberFormatException ignored){}
-        if(managerId!=0)return;
-        com.alibaba.fastjson.JSONArray config=com.alibaba.fastjson.JSON.parseArray(seed.toJSONString());
-        config.set(6,query.getOrDefault("device_id",""));
-        config.set(8,query.getOrDefault("iid",""));
-        config.set(13,query.getOrDefault("device_id",""));
-        dispatch(16777219,0,0L,null,vm.resolveClass("android/content/Context").newObject(null));
-        DvmObject<?> result=dispatch(67108865,0,0L,config.toJSONString(),null);
-        if(result==null||!Boolean.TRUE.equals(result.getValue()))throw new IllegalStateException("Initialization failed");
-        DvmObject<?> manager=dispatch(67108866,0,0L,null,null);
-        if(manager==null||!(manager.getValue() instanceof Long))throw new IllegalStateException("Initialization failed");
-        managerId=(Long)manager.getValue();
+        java.util.Map<String,String> query=IdentityBoundSignerWorker.identityValues(url);
+        com.alibaba.fastjson.JSONArray config=null;
+        try {
+            if (!String.valueOf(seed.get(0)).equals(query.get("aid")))
+                throw new IllegalArgumentException("Invalid signer application");
+            version=query.getOrDefault("version_name",version);
+            String code=query.get("version_code");
+            if (code!=null) {versionCode=Integer.parseInt(code);if(versionCode<=0)throw new IllegalArgumentException();}
+            if(managerId!=0)return;
+            config=com.alibaba.fastjson.JSON.parseArray(seed.toJSONString());
+            config.set(6,query.getOrDefault("device_id",""));
+            config.set(8,query.getOrDefault("iid",""));
+            config.set(13,query.getOrDefault("device_id",""));
+            dispatch(16777219,0,0L,null,vm.resolveClass("android/content/Context").newObject(null));
+            DvmObject<?> result=dispatch(67108865,0,0L,config.toJSONString(),null);
+            if(result==null||!Boolean.TRUE.equals(result.getValue()))throw new IllegalStateException("Initialization failed");
+            DvmObject<?> manager=dispatch(67108866,0,0L,null,null);
+            if(manager==null||!(manager.getValue() instanceof Long))throw new IllegalStateException("Initialization failed");
+            managerId=(Long)manager.getValue();
+        } finally {query.clear();if(config!=null)config.clear();}
     }
 
-    private java.util.Map<String,String> sign(com.alibaba.fastjson.JSONArray seed,String url,byte[] body) throws Exception {
-        java.net.URI uri=new java.net.URI(url);
-        if(!"https".equals(uri.getScheme())||uri.getHost()==null||uri.getUserInfo()!=null)throw new IllegalArgumentException("Invalid URL");
-        initialize(seed,url);
-        DvmObject<?> result=dispatch(33554438,0,managerId,url,body==null?null:new ByteArray(vm,body));
-        if(result==null||!(result.getValue() instanceof DvmObject[]))throw new IllegalStateException("Signing failed");
-        DvmObject<?>[] pairs=(DvmObject<?>[])result.getValue();
-        java.util.Map<String,String> output=new java.util.LinkedHashMap<>();
-        java.util.Set<String> allowed=new java.util.HashSet<>(java.util.Arrays.asList("X-Argus","X-Gorgon","X-Helios","X-Khronos","X-Ladon","X-Medusa"));
-        for(int i=0;i+1<pairs.length;i+=2){
-            String key=String.valueOf(pairs[i].getValue()),value=String.valueOf(pairs[i+1].getValue());
-            if(allowed.contains(key)&&!value.isEmpty()&&value.indexOf('\r')<0&&value.indexOf('\n')<0)output.put(key,value);
+    private java.util.Map<String,String> sign(com.alibaba.fastjson.JSONArray seed,HeaderContract.SigningRequest request) throws Exception {
+        initialize(seed,request.url());
+        if(!httpManagerCallbackSeen||httpManagerId==0L)throw new IllegalStateException("HTTP manager callback unavailable");
+        DvmObject<?> result;
+        try(HeaderContract.NativeCall call=request.nativeCall(httpManagerId)) {
+            String[] nativePairs=call.pairs();
+            try {
+                result=dispatch(call.opcode(),call.option(),call.httpManager(),call.url(),
+                        ArrayObject.newStringArray(vm,nativePairs));
+            } finally {java.util.Arrays.fill(nativePairs,null);}
         }
-        if(!output.keySet().containsAll(java.util.Arrays.asList("X-Argus","X-Gorgon","X-Khronos")))throw new IllegalStateException("Signing failed");
-        return output;
+        Object raw=result==null?null:result.getValue();
+        String[] strings=null;DvmObject<?>[] objects=null;
+        try {
+            if(raw instanceof DvmObject[]) {
+                objects=(DvmObject<?>[])raw;strings=new String[objects.length];
+                for(int i=0;i<objects.length;i++) {
+                    Object value=objects[i]==null?null:objects[i].getValue();
+                    if(!(value instanceof String))throw new IllegalStateException("Signing failed");
+                    strings[i]=(String)value;
+                }
+                raw=strings;
+            }
+            try(HttpSignatureResultContract.Inspection inspection=HttpSignatureResultContract.inspect(raw)) {
+                return inspection.requireSecurityHeaders();
+            }
+        } finally {
+            if(strings!=null)java.util.Arrays.fill(strings,null);
+            if(objects!=null)java.util.Arrays.fill(objects,null);
+        }
     }
 
     public static void main(String[] args) throws Exception {
@@ -250,41 +280,80 @@ public class DomesticSigner extends AbstractJni implements IOResolver<AndroidFil
         final java.util.concurrent.BlockingQueue<Object[]> queue=new java.util.concurrent.ArrayBlockingQueue<>(128);
         final java.util.concurrent.CompletableFuture<Boolean> ready=new java.util.concurrent.CompletableFuture<>();
         Thread worker=new Thread(()->{
+            com.alibaba.fastjson.JSONArray seed=null;
             try {
-                DomesticSigner nativeSigner=new DomesticSigner(new File(directory,"libmetasec_ml.so"),new File(directory,"libc++_shared.so"),null);
                 byte[] metadata;
                 try(java.io.InputStream stream=new java.util.zip.InflaterInputStream(new java.io.FileInputStream(new File(directory,"sdk-metadata.bin")))){metadata=readAll(stream,16384);}
-                com.alibaba.fastjson.JSONArray seed=com.alibaba.fastjson.JSON.parseArray(new String(metadata,StandardCharsets.UTF_8));
+                try {seed=com.alibaba.fastjson.JSON.parseArray(new String(metadata,StandardCharsets.UTF_8));}
+                finally {java.util.Arrays.fill(metadata,(byte)0);}
                 if(seed.size()!=17)throw new IllegalStateException("Metadata invalid");
+                final com.alibaba.fastjson.JSONArray template=seed;
+                IdentityBoundSignerWorker contexts=new IdentityBoundSignerWorker(()->new IdentityBoundSignerWorker.Context(){
+                    private final DomesticSigner signer=new DomesticSigner(new File(directory,"libmetasec_ml.so"),new File(directory,"libc++_shared.so"),null);
+                    private final com.alibaba.fastjson.JSONArray config=com.alibaba.fastjson.JSON.parseArray(template.toJSONString());
+                    public java.util.Map<String,String> sign(HeaderContract.SigningRequest request) throws Exception {return signer.sign(config,request);}
+                    public void close() throws Exception {try{signer.close();}finally{config.clear();}}
+                });
+                Runtime.getRuntime().addShutdownHook(new Thread(()->{try{contexts.close();}catch(Throwable ignored){}finally{template.clear();}},"signer-context-cleanup"));
                 ready.complete(true);
-                while(true){
-                    Object[] task=queue.take();
-                    @SuppressWarnings("unchecked") java.util.concurrent.CompletableFuture<java.util.Map<String,String>> future=(java.util.concurrent.CompletableFuture<java.util.Map<String,String>>)task[2];
-                    try{future.complete(nativeSigner.sign(seed,(String)task[0],(byte[])task[1]));}
-                    catch(Throwable ignored){future.completeExceptionally(new IllegalStateException("Signing failed",ignored));}
-                }
-            } catch(Throwable ignored){ready.completeExceptionally(new IllegalStateException("Signing runtime unavailable"));}
-        },"domestic-signer");
+                try {
+                    while(true) {
+                        Object[] task=queue.take();
+                        @SuppressWarnings("unchecked") java.util.concurrent.CompletableFuture<java.util.Map<String,String>> future=(java.util.concurrent.CompletableFuture<java.util.Map<String,String>>)task[1];
+                        HeaderContract.SigningRequest request=(HeaderContract.SigningRequest)task[0];
+                        java.util.Map<String,String> output=null;
+                        try {
+                            if(!future.isCancelled()) {
+                                output=contexts.sign(request);
+                                if(future.complete(output))output=null;
+                            }
+                        } catch(IdentityBoundSignerWorker.ContextCloseFailure fatal) {
+                            future.completeExceptionally(new IllegalStateException("Signer unavailable"));
+                            System.exit(70); // Gateway must see a dead process, not an alive permanently-poisoned signer.
+                        } catch(Throwable ignored) {future.completeExceptionally(new IllegalStateException("Signing failed"));}
+                        finally {if(output!=null)output.clear();request.close();java.util.Arrays.fill(task,null);}
+                    }
+                } finally {contexts.close();}
+            } catch(Throwable ignored) {ready.completeExceptionally(new IllegalStateException("Startup failed"));}
+            finally {if(seed!=null)seed.clear();}
+        },"hongguo-sdk");
         worker.setDaemon(true);worker.start();ready.get(40,java.util.concurrent.TimeUnit.SECONDS);
         com.sun.net.httpserver.HttpServer server=com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1",0),0);
         server.createContext("/sign",exchange->{
-            byte[] response;int status=200;
-            try{
+            byte[] response=null;int status=200;HeaderContract.SigningRequest request=null;
+            java.util.concurrent.CompletableFuture<java.util.Map<String,String>> future=null;
+            try {
                 if(!"POST".equals(exchange.getRequestMethod()))throw new IllegalArgumentException();
-                com.alibaba.fastjson.JSONObject request=com.alibaba.fastjson.JSON.parseObject(new String(readAll(exchange.getRequestBody(),131072),StandardCharsets.UTF_8));
-                byte[] body=request.containsKey("body_base64")?java.util.Base64.getDecoder().decode(request.getString("body_base64")):null;
-                if(body!=null&&body.length>65536)throw new IllegalArgumentException();
-                java.util.concurrent.CompletableFuture<java.util.Map<String,String>> future=new java.util.concurrent.CompletableFuture<>();
-                if(!queue.offer(new Object[]{request.getString("url"),body,future}))throw new IllegalStateException();
-                response=com.alibaba.fastjson.JSON.toJSONBytes(future.get(35,java.util.concurrent.TimeUnit.SECONDS));
-            }catch(Throwable ignored){status=503;response="{\"error\":\"Signing unavailable\"}".getBytes(StandardCharsets.UTF_8);}
-            exchange.getResponseHeaders().add("Content-Type","application/json");
-            exchange.sendResponseHeaders(status,response.length);exchange.getResponseBody().write(response);exchange.close();
+                byte[] privateRaw=readAll(exchange.getRequestBody(),HeaderContract.MAX_REQUEST_BYTES);
+                try {request=HeaderContract.parseRequest(privateRaw);}
+                finally {java.util.Arrays.fill(privateRaw,(byte)0);}
+                future=new java.util.concurrent.CompletableFuture<>();
+                if(!queue.offer(new Object[]{request,future}))throw new IllegalStateException();
+                request=null;
+                java.util.Map<String,String> output=future.get(35,java.util.concurrent.TimeUnit.SECONDS);
+                try {response=com.alibaba.fastjson.JSON.toJSONBytes(output);}finally{output.clear();}
+            } catch(Throwable ignored) {
+                if(future!=null && !future.cancel(false) && !future.isCompletedExceptionally()) {
+                    java.util.Map<String,String> abandoned=future.getNow(null);
+                    if(abandoned!=null)abandoned.clear();
+                }
+                status=503;response="{\"error\":\"Signing failed\"}".getBytes(StandardCharsets.UTF_8);
+            }
+            finally {if(request!=null)request.close();}
+            try {
+                exchange.getResponseHeaders().add("Content-Type","application/json");
+                exchange.sendResponseHeaders(status,response.length);exchange.getResponseBody().write(response);
+            } finally {if(response!=null)java.util.Arrays.fill(response,(byte)0);exchange.close();}
         });
         server.setExecutor(java.util.concurrent.Executors.newFixedThreadPool(8));server.start();
         lifecycle.println("SIGNER_READY 127.0.0.1:"+server.getAddress().getPort());
         Thread.currentThread().join();
     }
+    public void close() throws java.io.IOException {
+        managerId=0L;httpManagerId=0L;httpManagerCallbackSeen=false;httpCallbacks.reset();
+        emulator.close();
+    }
+
     private static byte[] readAll(java.io.InputStream input,int limit) throws java.io.IOException {
         java.io.ByteArrayOutputStream output=new java.io.ByteArrayOutputStream();byte[] block=new byte[4096];int count;
         while((count=input.read(block))>0){if(output.size()+count>limit)throw new java.io.IOException("Input too large");output.write(block,0,count);}

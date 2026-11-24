@@ -358,6 +358,9 @@ class MediaManager:
                 # 不把 CDN 凭据、绝对路径或供应商响应内容返回给界面。
                 if job.phase == "error":
                     messages = {
+                        "UPSTREAM_TIMEOUT": "手机播放接口连接超时，请稍后重试当前集",
+                        "UPSTREAM_UNAVAILABLE": "手机播放接口暂时不可用，请稍后重试当前集",
+                        "MEDIA_SOURCE_EMPTY": "手机接口没有返回这集的播放地址，请稍后重试当前集",
                         "MEDIA_ACCESS_RESTRICTED": "官网暂未开放这集的播放权限，已保留当前进度",
                         "MEDIA_WEB_UNAVAILABLE": "官网播放线路暂时不可用，请重试当前集",
                         "MEDIA_DOWNLOAD_FAILED": "各播放线路暂时连接失败，请重试当前集",

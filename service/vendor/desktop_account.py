@@ -519,6 +519,15 @@ def _extract_session(response, session):
                 token = str(data[key])
                 break
     if not token:
+        header_token = response.headers.get('x-tt-token')
+        if header_token is None:
+            header_token = next((value for key, value in response.headers.items()
+                                 if isinstance(key, str) and key.lower() == 'x-tt-token'), None)
+        # Keep the import-session bound; never persist malformed HTTP credentials.
+        if (isinstance(header_token, str) and 0 < len(header_token) <= 8192
+                and all(33 <= ord(char) <= 126 for char in header_token)):
+            token = header_token
+    if not token:
         token = (session or {}).get('token') or ''
     user = ''
     uid = ''

@@ -7,6 +7,14 @@ ROOT=Path(__file__).resolve().parents[2]
 
 def functions(file,names,namespace):
     tree=ast.parse(file.read_text(encoding='utf-8'))
+    names=set(names)
+    if 'get_video_tracks' in names:
+        # Preserve actual snapshot/order behavior; only transport and identity
+        # are synthetic. Do not replace a new production helper with a no-op.
+        names.update({'_api_hosts_ordered','_copy_playback_host_snapshot','playback_host_snapshot'})
+        namespace.setdefault('HOST','model-0.example')
+        namespace.setdefault('_API_HOSTS',('model-0.example','model-1.example'))
+        namespace.setdefault('_api_host_pref',None)
     selected=[node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name in names]
     exec(compile(ast.Module(body=selected,type_ignores=[]),str(file),'exec'),namespace)
     return namespace
@@ -43,6 +51,38 @@ class SigningTests(unittest.TestCase):
     def test_empty_signature_is_rejected(self):
         self.adapter.post.return_value.json.return_value={}
         with self.assertRaisesRegex(RuntimeError,'unavailable'):self.namespace['sign']('https://reading.snssdk.com/fixture',{})
+
+class PlaybackQueryTests(unittest.TestCase):
+    """A zero-byte HTTP 200 from player routes is caused by a missing
+    nonempty manifest_version_code. Verified by same-identity A/B: absent or
+    empty -> 0 bytes; any nonempty value -> real model. The value is not
+    compared by upstream."""
+
+    def build(self, base_query, path='/novel/player/video_model/v1'):
+        namespace = functions(ROOT/'service/vendor/hongguo.py', {'build_url'}, {
+            'CFG': {'base_query': dict(base_query)}, '_pool': None, 'HOST': 'model-0.example',
+            'requests': types.SimpleNamespace(utils=types.SimpleNamespace(quote=__import__('urllib.parse', fromlist=['quote']).quote)),
+            'time': time, '_hq_ensure_iid': lambda: None,
+            '_PLAYBACK_QUERY_PATHS': ('/novel/player/',)})
+        return namespace['build_url'](path)
+
+    def test_player_route_gains_nonempty_manifest_version_code(self):
+        url = self.build({'aid': '8662', 'version_code': '73932'})
+        self.assertIn('manifest_version_code=73932', url)
+
+    def test_existing_manifest_version_code_is_preserved(self):
+        url = self.build({'aid': '8662', 'version_code': '73932', 'manifest_version_code': '111'})
+        self.assertIn('manifest_version_code=111', url)
+        self.assertNotIn('manifest_version_code=73932', url)
+
+    def test_empty_manifest_version_code_is_replaced(self):
+        url = self.build({'aid': '8662', 'version_code': '73932', 'manifest_version_code': ''})
+        self.assertIn('manifest_version_code=73932', url)
+
+    def test_non_player_route_query_is_unchanged(self):
+        url = self.build({'aid': '8662', 'version_code': '73932'}, path='/reading/bookapi/book/v1')
+        self.assertNotIn('manifest_version_code', url)
+
 
 class ModelRouteTests(unittest.TestCase):
     def test_current_player_model_is_selected_for_the_requested_video_only(self):

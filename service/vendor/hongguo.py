@@ -117,6 +117,15 @@ def _api_hosts_ordered():
             out.append(_h)
     return out
 
+def _copy_playback_host_snapshot(hosts):
+    if not isinstance(hosts,(tuple,list)) or not hosts or any(not isinstance(host,str) or not host for host in hosts):
+        raise ValueError('host_snapshot must contain nonempty host strings')
+    return tuple(hosts)
+
+def playback_host_snapshot():
+    """Bound to one source job; never retain VID-specific global host memory."""
+    return _copy_playback_host_snapshot(_api_hosts_ordered())
+
 def _hq_apply_device_identity():
     path = os.path.join(os.environ['HG_DATA_DIR'], 'desktop-device.json')
     try:
@@ -147,6 +156,13 @@ try:
 except Exception:
     pass
 
+# Playback model/detail endpoints reject requests whose query lacks a nonempty
+# manifest_version_code with HTTP 200 and a zero-byte body. Verified by A/B on
+# the same PC identity, signer and body: absent/empty -> 0 bytes, any nonempty
+# value (1, 73932, 74332) -> real model. Keep it for player paths only so other
+# API contracts are unchanged.
+_PLAYBACK_QUERY_PATHS = ('/novel/player/',)
+
 def build_url(path, extra=None, host=None):
     _hq_ensure_iid()
     q = dict(CFG['base_query'])
@@ -154,6 +170,10 @@ def build_url(path, extra=None, host=None):
         q.update(_pool.current()['query'])
     if extra:
         q.update(extra)
+    if path.startswith(_PLAYBACK_QUERY_PATHS) and not str(q.get('manifest_version_code') or ''):
+        # Prefer the configured manifest code; fall back to the client version so
+        # the parameter is still nonempty for older configs.
+        q['manifest_version_code'] = str(q.get('manifest_version_code') or q.get('version_code') or '')
     q['_rticket'] = str(int(time.time() * 1000))
     qs = '&'.join((f"{k}={requests.utils.quote(str(v), safe='')}" for k, v in q.items()))
     return f'https://{host or HOST}{path}?{qs}'
@@ -213,7 +233,8 @@ class UpstreamResponseError(RuntimeError):
 _HQ_TRANSIENT_CODES = {110001, 100001, 100002}
 _HQ_TRANSIENT_TRIES = 2
 
-def api(method, path, body=None, extra_query=None, max_retries=3, signed=True):
+def api(method, path, body=None, extra_query=None, max_retries=3, signed=True,
+        max_hosts=None, host_offset=0, host_snapshot=None):
     """带签名的 API 调用,含重试退避 + 登录态自动刷新 + 多主机故障转移。
     signed=False: 免签(列表/榜单/筛选类接口红果不校验签名, 不占用签名后端)。
 
@@ -223,7 +244,19 @@ def api(method, path, body=None, extra_query=None, max_retries=3, signed=True):
     global _api_host_pref
     desktop = True
     last = None
-    for host in _api_hosts_ordered():
+    # Playback can bound its physical requests without changing host failover
+    # for account/catalog callers or mutating the shared host/config state.
+    if max_hosts is not None and (isinstance(max_hosts, bool) or not isinstance(max_hosts, int) or max_hosts < 1):
+        raise ValueError('max_hosts must be a positive integer')
+    if isinstance(host_offset, bool) or not isinstance(host_offset, int) or host_offset < 0:
+        raise ValueError('host_offset must be a nonnegative integer')
+    hosts = _api_hosts_ordered() if host_snapshot is None else list(_copy_playback_host_snapshot(host_snapshot))
+    if host_offset and hosts:
+        start = host_offset if host_offset < len(hosts) else 0
+        hosts = hosts[start:] + hosts[:start]
+    if max_hosts is not None:
+        hosts = hosts[:max_hosts]
+    for host in hosts:
         for attempt in range(max_retries):
             try:
                 j = _api_once(method, path, body, extra_query, signed=signed, host=host)
@@ -546,13 +579,20 @@ def get_video_urls(vids, force=False):
                 SG.cache_set(SG.cache_key('vmodel', vid), best, ttl=18000)
     return out
 
-def get_video_tracks(vids, force=False, batch_size=5):
+def get_video_tracks(vids, force=False, batch_size=5, host_snapshot=None):
     """批量取每个vid的完整 video_list 轨道(含 main_url/backup_url/video_meta/encrypt_info.spade_a)。
     与 get_video_urls 不同: 保留 spade_a(离线解密必需) 和全部清晰度轨道(供选清晰度)。
     一次 5 个 vid(app 真实批量大小)→ 5 集只签 1 次, 大幅降签名/节流/风控压力。
     按 vid 缓存 5h(main_url url_expire 约6h); force=True 跳过缓存(URL过期续传用)。
     返回 {vid(str): [track,...]}; 未返回的 vid 不在结果里(调用方自行回退)。"""
     out, todo, seen = ({}, [], set())
+    # Four official contracts are retained. A source round tries one host per
+    # contract; a force refresh moves to the next host instead of rescanning all
+    # mirrors. A single available host remains usable on refresh.
+    host_offset = 1 if force else 0
+    # Freeze once for all contracts. Provider.source supplies the same immutable
+    # snapshot to normal/force rounds so catalog success cannot move affinity.
+    host_snapshot = playback_host_snapshot() if host_snapshot is None else _copy_playback_host_snapshot(host_snapshot)
     for v in vids:
         v = str(v)
         if v in seen:
@@ -570,7 +610,8 @@ def get_video_tracks(vids, force=False, batch_size=5):
         _hq_got = {}
         modern = {**body, 'dr_scene': 'player', 'mixed_video_id_map': {'1004': batch}}
         try:
-            response = api('POST', '/novel/player/multi_video_model/player/v1', body=modern)
+            response = api('POST', '/novel/player/multi_video_model/player/v1', body=modern,
+                max_retries=1, max_hosts=1, host_offset=host_offset, host_snapshot=host_snapshot)
             def collect(value):
                 if not isinstance(value, dict):
                     return
@@ -597,7 +638,8 @@ def get_video_tracks(vids, force=False, batch_size=5):
                     extra_query={'video_id': str(_hq_v), 'video_id_type': '0',
                         'device_level': '1', 'need_all_video_definition': '1',
                         'need_mp4_align': '0', 'use_os_player': '0',
-                        'video_platform': '1024', 'source': '0', 'from_video_id': ''})
+                        'video_platform': '1024', 'source': '0', 'from_video_id': ''},
+                    max_retries=1, max_hosts=1, host_offset=host_offset, host_snapshot=host_snapshot)
                 _hq_data = _hq_j.get('data') if isinstance(_hq_j, dict) else None
                 if isinstance(_hq_data, dict):
                     _hq_rows = _hq_data.get('video_model_data')
@@ -619,17 +661,24 @@ def get_video_tracks(vids, force=False, batch_size=5):
             if str(_hq_v) in _hq_got:
                 continue
             try:
-                _hq_j = api('GET', '/reading/bookapi/video_tab/video_model/v1/', extra_query={'video_id': str(_hq_v), 'need_all_video_definition': '1'})
+                _hq_j = api('GET', '/reading/bookapi/video_tab/video_model/v1/',
+                    extra_query={'video_id': str(_hq_v), 'need_all_video_definition': '1'},
+                    max_retries=1, max_hosts=1, host_offset=host_offset, host_snapshot=host_snapshot)
                 _hq_vm = (_hq_j.get('data') or {}).get('video_model')
                 if _hq_vm:
                     _hq_got[str(_hq_v)] = {'video_model': _hq_vm}
+            except (RiskControlError, AuthExpiredError):
+                raise
             except Exception:
                 continue
         if not _hq_got:
             try:
-                j = api('POST', '/novel/player/multi_video_model/v1/', body=body)
+                j = api('POST', '/novel/player/multi_video_model/v1/', body=body,
+                    max_retries=1, max_hosts=1, host_offset=host_offset, host_snapshot=host_snapshot)
                 _hq_got = j.get('data') or {}
-            except (RiskControlError, UpstreamResponseError):
+            except (RiskControlError, AuthExpiredError):
+                raise
+            except UpstreamResponseError:
                 _hq_got = {}
             except Exception:
                 _hq_got = {}

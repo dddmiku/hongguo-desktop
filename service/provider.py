@@ -1384,11 +1384,23 @@ class Provider:
             def resolution(track):
                 return number(re.sub(r"\D", "", str((track.get("video_meta") or {}).get("definition") or "")))
 
+            host_snapshot_reader=getattr(self.sdk,'playback_host_snapshot',None)
+            host_snapshot=None
+            host_snapshot_ready=False
             def mobile_tracks(force):
+                nonlocal host_snapshot,host_snapshot_ready
                 # Preserve authentication and safety failures before _read maps
                 # generic SDK errors to a temporary upstream outage.
                 try:
-                    models = self.sdk.get_video_tracks([target["vid"]], **({"force": True} if force else {}))
+                    if callable(host_snapshot_reader) and not host_snapshot_ready:
+                        value=host_snapshot_reader()
+                        if not isinstance(value,(tuple,list)) or not value or any(not isinstance(host,str) or not host for host in value):
+                            raise ValueError('Invalid playback host snapshot')
+                        host_snapshot=tuple(value);host_snapshot_ready=True
+                    options={"force":True} if force else {}
+                    if host_snapshot_ready:options['host_snapshot']=host_snapshot
+                    self._cancel(cancelled)
+                    models = self.sdk.get_video_tracks([target["vid"]], **options)
                 except AuthExpiredError:
                     raise ProviderError("AUTH_EXPIRED", "手机登录态已失效，请重新登录后播放", 401) from None
                 except RiskControlError:
@@ -1410,7 +1422,17 @@ class Provider:
             for channel in channels:
                 source_check()
                 if channel == "website":
-                    tracks, source_check = self._web_playback_tracks(target["vid"], sid, episode, quality, cancelled)
+                    try:
+                        tracks, source_check = self._web_playback_tracks(target["vid"], sid, episode, quality, cancelled)
+                    except ProviderError as error:
+                        self._cancel(cancelled)
+                        # A secondary web-session/route denial cannot explain
+                        # why the authenticated mobile model or CDN failed.
+                        # Keep the primary safe cause, but never mask account
+                        # changes or cancellation with an earlier failure.
+                        if error.code == "MEDIA_WEB_UNAVAILABLE" and last_error is not None:
+                            raise last_error from None
+                        raise
                     budget = 6
                 else:
                     if mobile_unavailable:
