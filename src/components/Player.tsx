@@ -207,7 +207,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     }catch(failure){if(valid())setNotice((failure as Error).message||'这一季暂时未能加载，请重试');}
     finally{if(seasonPick.current===intent){seasonPick.current=null;setPickingSeason('');}}
   },[cancelSeasonPick,selectMedia,hide]);
-  const continueSeason=useCallback(async(automatic=false,original=current())=>{
+  const continueSeason=useCallback(async(automatic=false,original=current(),options?:{revealControls?:boolean})=>{
     if(!original||!isLast(original)||closed.current||!visible.current||requested.current||seasonPick.current)return;
     const source=original.target.seriesId,generation=seasonGeneration.current,account=latest.current.accountKey;
     const baseValid=()=>mounted.current&&!closed.current&&visible.current&&latest.current.isActive&&generation===seasonGeneration.current&&account===latest.current.accountKey&&current()===original&&latest.current.detail.series.id===source&&(!automatic||latest.current.settings.autoplay&&shouldPlay.current);
@@ -216,15 +216,15 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
     const valid=()=>baseValid()&&seasonTransition.current===transition;
     void saveDeck(original);original.video.pause();setPlaying(false);setPhase('正在衔接下一季');
     try{const destination=await lookupSeason();if(!valid()||seasonTransition.current!==transition)return;
-      if(destination?.detail)await selectMedia(destination.detail,destination.result.firstEpisode!,automatic,0,false,false,{allow:valid});
+      if(destination?.detail)await selectMedia(destination.detail,destination.result.firstEpisode!,automatic,0,false,false,{allow:valid,revealControls:options?.revealControls??true});
       else{shouldPlay.current=false;setPhase('本季播放完毕');setChrome(true);}
     }finally{if(seasonTransition.current===transition){seasonTransition.current=null;setContinuing(false);if(current()===original&&!requested.current){setPhase('本季播放完毕');setChrome(true);}}}
   },[lookupSeason,selectMedia,saveDeck]);
-  const advance = useCallback(() => {
+  const advance = useCallback((revealControls = true) => {
     if (requested.current && requested.current.seriesId !== latest.current.detail.series.id) return;
     const next = adjacentEpisode(latest.current.detail.episodes, nextEpisode(), 1);
-    if (next !== undefined) void selectEpisode(next);
-    else if (current() && isLast(current()!)) void continueSeason(false);
+    if (next !== undefined) void selectEpisode(next, false, 0, false, false, { revealControls });
+    else if (current() && isLast(current()!)) void continueSeason(false, current()!, { revealControls });
   }, [selectEpisode, continueSeason]);
   const suspendPlayback=useCallback(()=>{
     const deck=current();
@@ -386,7 +386,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
         case 'mute': setMuted(value => !value); break;
         case 'fullscreen': void toggleFullscreen(); break;
         case 'theater': toggleTheater(); break;
-        case 'next': advance(); break;
+        case 'next': advance(false); return;
         case 'danmaku':
           updateDanmaku({ enabled: !(pendingDanmaku.current ?? danmakuPreferences(latest.current.settings.danmaku)).enabled });
           break;
@@ -468,7 +468,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
         <div className="timeline"><div className="buffer-bar" style={{width:`${duration?Math.min(100,buffered/duration*100):0}%`}}/><input aria-label="播放进度" aria-valuetext={duration ? `${spokenTime(sliderPosition)}，共 ${spokenTime(duration)}` : '时长待确认'} type="range" min="0" max={duration||1} step=".1" disabled={!duration} title={duration?'拖动选择播放位置':'正在确认完整时长'} value={sliderPosition} onChange={e=>seekTo(Number(e.target.value))} onPointerUp={e=>e.currentTarget.blur()} onPointerCancel={e=>e.currentTarget.blur()} style={{background:`linear-gradient(to right,var(--brand) ${duration?sliderPosition/duration*100:0}%,transparent 0)`}}/></div>
         <div className="controls-row">
           <button className="icon-button" title={playIntent?'暂停（空格）':'播放（空格）'} onClick={toggle}>{playIntent?<Pause size={23}/>:<Play size={23}/>}</button>
-          <button className="icon-button" title={atSeasonEnd?'下一季（J）':'下一集（J）'} disabled={!canAdvance||continuing} onClick={advance}><SkipForward size={22}/></button>
+          <button className="icon-button" title={atSeasonEnd?'下一季（J）':'下一集（J）'} disabled={!canAdvance||continuing} onClick={()=>advance()}><SkipForward size={22}/></button>
           <span className="player-time">{time(pendingPosition??position)} <span>/ {duration?time(duration):'时长待确认'}</span></span><div className="controls-spacer"/>
           <div className="danmaku-actions"><button className={`icon-button danmaku-toggle ${danmakuSettings.enabled?'active':''}`} title={danmakuSettings.enabled?'关闭弹幕（D）':'开启弹幕（D）'} aria-label={danmakuSettings.enabled?'关闭弹幕':'开启弹幕'} aria-pressed={danmakuSettings.enabled} onClick={() => updateDanmaku({ enabled: !danmakuSettings.enabled })}>弹</button><button className={`icon-button danmaku-settings-button ${danmakuPanel?'active':''}`} title="弹幕设置" aria-label="弹幕设置" aria-expanded={danmakuPanel} onClick={toggleDanmakuPanel}><SlidersHorizontal size={15}/></button></div>
           <button className="icon-button" title="静音（M）" onClick={()=>setMuted(m=>!m)}>{muted?<VolumeX size={20}/>:<Volume2 size={20}/>}</button>
@@ -489,7 +489,7 @@ export default function Player({ detail:initialDetail, initialEpisode, initialPo
       </div>{comments&&<Comments key={accountKey} seriesId={detail.series.id} episode={episode} onClose={()=>setComments(false)}/>}</div>
 
     {seasonInfo.source===detail.series.id&&seasonInfo.phase!=='idle'&&<aside className="next-season-card" data-season-status={seasonInfo.phase} aria-live="polite"><div><small>{seasonInfo.destination?.detail?`第 ${seasonInfo.destination.result.nextSeason} 季 · 共 ${seasonInfo.destination.detail.series.totalEpisodes||seasonInfo.destination.detail.episodes.length} 集`:'下一季'}</small><strong>{seasonInfo.destination?.detail?.series.title||(seasonInfo.phase==='ambiguous'?'季关联暂不明确':seasonInfo.phase==='none'?'暂无已确认的下一季':'正在查找下一季')}</strong><span>{seasonInfo.error||(seasonInfo.phase==='ready'?'首集已准备好，季末自动衔接':seasonInfo.phase==='identified'?'已确认下一季，季末预热首集':seasonInfo.phase==='preparing'?'正在准备下一季首集':seasonInfo.phase==='looking'?'正在确认官方季关联':seasonInfo.phase==='ambiguous'?'存在多个候选，已暂停自动跨季':'本季结束后将停止播放')}</span></div>{['looking','preparing'].includes(seasonInfo.phase)&&<LoaderCircle className="spin" size={18}/>}<div className="next-season-actions">{seasonInfo.phase==='error'&&<button className="btn" onClick={retrySeason}>重试下一季</button>}{seasonInfo.destination?.detail&&atSeasonEnd&&<button className="btn primary" disabled={continuing} onClick={()=>void continueSeason(false)}>{continuing?'正在衔接':'播放下一季'}</button>}</div></aside>}
-    <div className="episode-heading"><div><h3>选集</h3><span>{episodeMeta?.title||`第 ${episode} 集`}</span></div><div className="episode-actions"><label className="autoplay-switch"><input type="checkbox" checked={settings.autoplay} onChange={e=>onSettings({autoplay:e.target.checked})}/> 自动连播</label><button className="icon-button" aria-label="上一集" disabled={previousEpisode===undefined||continuing} onClick={()=>{if(previousEpisode!==undefined)void selectEpisode(previousEpisode);}}><ChevronLeft size={20}/></button><button className="icon-button" aria-label={atSeasonEnd?'下一季':'下一集'} disabled={!canAdvance||continuing} onClick={advance}><ChevronRight size={20}/></button></div></div>
+    <div className="episode-heading"><div><h3>选集</h3><span>{episodeMeta?.title||`第 ${episode} 集`}</span></div><div className="episode-actions"><label className="autoplay-switch"><input type="checkbox" checked={settings.autoplay} onChange={e=>onSettings({autoplay:e.target.checked})}/> 自动连播</label><button className="icon-button" aria-label="上一集" disabled={previousEpisode===undefined||continuing} onClick={()=>{if(previousEpisode!==undefined)void selectEpisode(previousEpisode);}}><ChevronLeft size={20}/></button><button className="icon-button" aria-label={atSeasonEnd?'下一季':'下一集'} disabled={!canAdvance||continuing} onClick={()=>advance()}><ChevronRight size={20}/></button></div></div>
     <EpisodeGrid episodes={detail.episodes} episode={episode} onSelect={selectEpisode}/>
     <SeasonOverview series={detail.series} action="play" pendingId={pickingSeason} disabled={!current()} onSelect={series=>void selectSeason(series)}/>
     <p className="player-description">{detail.series.intro}</p>

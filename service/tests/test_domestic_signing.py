@@ -111,10 +111,12 @@ class SignerPortDiscoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'loopback'):
             self.with_fake_table(row,lambda: namespace['owned_listener'](4242))
 
-    def test_startup_uses_table_then_stdout_fallback_with_health_probe(self):
+    def test_startup_uses_table_then_stdout_fallback_with_tcp_probe(self):
         source=(ROOT/'service/gateway.py').read_text(encoding='utf-8')
         self.assertIn('owned_listener(self.process.pid) or self.stdout_port', source)
-        self.assertIn('urllib.request.urlopen(candidate + "/health"', source)
+        # The signer exposes only /sign, so readiness is a TCP connect, never an HTTP health route.
+        self.assertIn('socket.create_connection(("127.0.0.1", port), timeout=2)', source)
+        self.assertNotIn('urlopen(candidate', source)
 
     def test_parent_watch_reads_stdin_without_buffered_reader(self):
         source=(ROOT/'service/gateway.py').read_text(encoding='utf-8')

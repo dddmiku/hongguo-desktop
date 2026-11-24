@@ -273,6 +273,22 @@ try {
   await page.keyboard.press('j');
   await page.waitForFunction(() => document.querySelector('video[data-active=true]')?.dataset.episode === '3', undefined, { timeout: 20000 });
   check('窗口全屏切集跳过缺号并保持布局与实际解码', fillsWindow(await geometry()) && await page.locator('video[data-active=true]').evaluate(node => node.videoWidth > 0 && !node.paused));
+  await page.mouse.move(600, 300);
+  await page.waitForSelector('.video-stage.controls-hidden', { timeout: 10000 });
+  await observeControls();
+  await page.keyboard.press('n');
+  await page.waitForFunction(() => document.querySelector('video[data-active=true]')?.dataset.episode !== '3', undefined, { timeout: 20000 });
+  await page.waitForTimeout(120);
+  const nBar = await page.locator('.video-stage').evaluate(stage => !stage.classList.contains('controls-hidden'));
+  check('键盘 N 切集不弹出底部控制栏', !nBar && !(await page.evaluate(() => window.__controlsFlashed)));
+  // 剧场模式隐藏选集栏：临时退出剧场退回第 3 集，再进剧场继续后续用例。
+  await page.keyboard.press('t');
+  await page.waitForFunction(() => !document.querySelector('.player-theater'), undefined, { timeout: 10000 });
+  await hover();
+  await page.getByRole('button', { name: '上一集', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('video[data-active=true]')?.dataset.episode === '3', undefined, { timeout: 20000 });
+  await page.keyboard.press('t');
+  await page.waitForSelector('.player-theater', { timeout: 10000 });
   await hover(); await page.getByTitle('暂停（空格）').click();
   const pausedPosition = await observeSeeks();
   await page.keyboard.press('ArrowRight');

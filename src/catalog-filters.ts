@@ -11,6 +11,8 @@ export type CategoryKey = 'theme' | 'setting' | 'background';
 export const categoryKeys: Record<string, CategoryKey> = { category_dim_theme: 'theme', category_dim_role: 'setting', category_dim_epoch: 'background' };
 const defaults: CatalogSelection = { board: 'hot', sort: 'hot_score', theme: '', setting: '', background: '', expanded: false };
 const selectionDefaults = (scope: string): CatalogSelection => ({ ...defaults, board: scope === 'rank:series' ? 'recommend' : 'hot' });
+/** 排行榜默认落第一个页签（系列剧）；已保存的选择仍然优先。 */
+export const rankDefaultGenre: RankGenre = 'series';
 const preferences = new Map<string, CatalogSelection>();
 const STORAGE = 'hongguo:catalog-selection-v1';
 let loaded = false;

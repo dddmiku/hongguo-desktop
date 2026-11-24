@@ -18,7 +18,6 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.request
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -306,12 +305,13 @@ class OwnedSigner:
             # and the signer's own SIGNER_READY port is the fallback (issue #1).
             port = (owned_listener(self.process.pid) or self.stdout_port) if os.name == "nt" else self.stdout_port
             if port:
-                candidate = f"http://127.0.0.1:{port}"
+                # The signer only exposes /sign (no /health). Prove readiness
+                # with a TCP connect: any accepted loopback connection means the
+                # HTTP listener owned by this PID is up.
                 try:
-                    with urllib.request.urlopen(candidate + "/health", timeout=2) as response:
-                        if response.status == 200:
-                            return candidate
-                except Exception:
+                    with socket.create_connection(("127.0.0.1", port), timeout=2):
+                        return f"http://127.0.0.1:{port}"
+                except OSError:
                     pass
             stop.wait(.05)
         raise RuntimeError("Signing startup was interrupted or timed out")
