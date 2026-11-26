@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Genre, HistoryItem, Series } from '../../shared/contracts';
 import { Empty, Failure, Poster, message } from './ui';
 import { readCatalog, writeCatalog } from '../catalog-cache';
+import { isExpiredCursor, mergeContinuation, resumableCursor } from '../catalog-pagination';
 import type { CatalogFilterGroup, CatalogResult } from '../catalog-cache';
 import { catalogGroups, catalogRoute, categoryKeys, categorySelected, rankBoards, rankDefaultGenre, readCatalogSelection, saveCatalogSelection } from '../catalog-filters';
 import type { CatalogPage, CatalogSelection, RankGenre } from '../catalog-filters';
@@ -35,7 +36,9 @@ export default function Catalog({ page, query, genre, accountKey, favorites, his
   const path = catalogRoute(page, query, genre, selected, rankGenre), cacheKey = path + (page === 'recommend' || page === 'search' ? `#account=${accountKey}` : '');
   const initial = readCatalog(cacheKey);
   const [items, setItems] = useState<Series[]>(initial?.items || []), [loading, setLoading] = useState(true), [error, setError] = useState('');
-  const [cursor, setCursor] = useState(''), [hasMore, setHasMore] = useState(false), [moreLoading, setMoreLoading] = useState(false);
+  // A restored prefix is display-only: its continuation token died with the
+  // previous app session, so wait for the live first page before offering more.
+  const [cursor, setCursor] = useState(''), [hasMore, setHasMore] = useState(false), [moreLoading, setMoreLoading] = useState(false), [moreRecovered, setMoreRecovered] = useState(false);
   const [filterState, setFilterState] = useState<{ genre: Genre; groups: CatalogFilterGroup[] }>(() => ({ genre, groups: catalogGroups(initial?.filters || readCatalog(`/catalog/filters?genre=${genre}`)?.filters) }));
   const groups = filterState.genre === genre ? filterState.groups : catalogGroups(readCatalog(`/catalog/filters?genre=${genre}`)?.filters);
   const [filterLoading, setFilterLoading] = useState(false), [filterError, setFilterError] = useState('');
@@ -60,10 +63,10 @@ export default function Catalog({ page, query, genre, accountKey, favorites, his
     const id = ++generation.current;
     const known = readCatalog(cacheKey), forced = force.current; force.current = false;
     let poll: ReturnType<typeof setTimeout> | undefined, polls = 0, first = true;
-    const apply = (data: CatalogResult, retained = false) => { const keep = page === 'discover' && !data.items?.length && !!readCatalog(cacheKey)?.items.length; if (!keep) { setItems(data.items || []); setCursor(data.cursor || ''); setHasMore(!!data.hasMore); } setCached(keep || retained || !!data.cached); setUpdating(!!data.updating); if (data.filters) { setFilterState({ genre, groups: catalogGroups(data.filters) }); setFilterError(''); } };
+    const apply = (data: CatalogResult, retained = false) => { const keep = page === 'discover' && !data.items?.length && !!readCatalog(cacheKey)?.items.length; if (!keep) { setItems(data.items || []); setCursor(resumableCursor(retained || !!data.cached, data.cursor)); setHasMore(!(retained || data.cached) && !!data.hasMore); } setCached(keep || retained || !!data.cached); setUpdating(!!data.updating); if (data.filters) { setFilterState({ genre, groups: catalogGroups(data.filters) }); setFilterError(''); } };
     if (scope.current !== cacheKey) { if (known) apply(known, true); else { setItems([]); setCursor(''); setHasMore(false); setCached(false); } }
     scope.current = cacheKey;
-    setLoading(true); setSlow(false); setError(''); setMoreError(false); setMoreLoading(false);
+    setLoading(true); setSlow(false); setError(''); setMoreError(false); setMoreLoading(false); setMoreRecovered(false);
     if (known) requestAnimationFrame(() => ready.current?.());
     const slowTimer = setTimeout(() => { if (id === generation.current) setSlow(true); }, 6000);
     const request = async (refresh = false) => {
@@ -84,9 +87,32 @@ export default function Catalog({ page, query, genre, accountKey, favorites, his
   const loadMore = async () => {
     if (moreLoading || !hasMore) return;
     const id = generation.current; setMoreLoading(true);
+    const commit = (pageData: CatalogResult, recovered = false) => {
+      if (id !== generation.current) return;
+      setItems(current => {
+        const merged = mergeContinuation(current, { items: pageData.items || [], hasMore: !!pageData.hasMore, cursor: pageData.cursor || '' });
+        writeCatalog(cacheKey, { ...pageData, filters: pageData.filters || { groups }, items: merged.items });
+        setHasMore(merged.hasMore); setCursor(merged.cursor);
+        return merged.items;
+      });
+      setError(pageData.warning || ''); setMoreError(false); setMoreRecovered(recovered);
+    };
     try {
-      const data = await window.hongguo.request<CatalogResult>(`${path}&cursor=${encodeURIComponent(cursor)}`);
-      if (id === generation.current) { setItems(current => { const items = [...current, ...data.items.filter(item => !current.some(s => s.id === item.id))]; writeCatalog(cacheKey, { ...data, filters: data.filters || { groups }, items }); return items; }); setHasMore(!!data.hasMore); setCursor(data.cursor || ''); setError(data.warning || ''); setMoreError(false); }
+      let pageData: CatalogResult, recovered = false;
+      try { pageData = await window.hongguo.request<CatalogResult>(`${path}&cursor=${encodeURIComponent(cursor)}`); }
+      catch (error) {
+        if (!isExpiredCursor(error)) throw error;
+        // The continuation token expired (for example after the window sat
+        // idle). Reload this exact filter/board session and resume one page
+        // from its fresh cursor instead of dropping the user into a retry.
+        // Bypass a cached first page: it may still carry the same dead token.
+        const fresh = await window.hongguo.request<CatalogResult>(path + `${path.includes('?') ? '&' : '?'}refresh=true`);
+        if (id !== generation.current) return;
+        recovered = true;
+        if (!fresh.cursor) { commit({ ...fresh, items: [], hasMore: false, cursor: '' }, true); return; }
+        pageData = await window.hongguo.request<CatalogResult>(`${path}&cursor=${encodeURIComponent(fresh.cursor)}`);
+      }
+      commit(pageData, recovered);
     } catch (e) { if (id === generation.current) { setError(message(e)); setMoreError(true); } }
     finally { if (id === generation.current) setMoreLoading(false); }
   };
@@ -119,6 +145,7 @@ export default function Catalog({ page, query, genre, accountKey, favorites, his
       <div className="section-heading"><h2>{page === 'rank' ? <><TrendingUp size={21} />{seriesRank ? `系列剧${boards.find(board => board.id === selected.board)?.title || '推荐榜'}` : '正在热播'}</> : page === 'search' ? <><Search size={21} />相关作品</> : <><Grid2X2 size={20} />{filtered ? activeFilters.map(option => option.name).join(' · ') || '分类作品' : page === 'browse' ? '全部作品' : '值得追的故事'}</>}</h2><span>{visibleItems.length} 部作品{hasMore ? ' · 可继续浏览' : ''}</span></div>
       <div className="series-grid">{visibleItems.map((s, i) => <SeriesCard key={s.id} series={s} index={page === 'rank' ? i : undefined} favorite={ids.has(s.id)} onOpen={() => onOpen(s)} onFavorite={() => onFavorite(s)} />)}</div>
       </>}
+      {moreRecovered && !error && <p className="catalog-recovered" role="status">{page === 'search' ? '搜索结果已更新' : page === 'browse' ? '片单已更新' : '榜单已更新'}，已自动继续加载</p>}
       {error && <div className="catalog-warning" role="status"><span>{visibleItems.length ? '已保留片单。' : ''}{error}</span><button className="btn subtle" onClick={moreError ? loadMore : refresh} disabled={loading || moreLoading}>重试<RefreshCw size={14} /></button></div>}{hasMore && page !== 'discover' && <div className="load-more"><button className="btn secondary" disabled={moreLoading || loading} onClick={loadMore}>{moreLoading ? '正在加载…' : '加载更多故事'}<ArrowRight size={16} /></button></div>}
     </>}
   </div>;

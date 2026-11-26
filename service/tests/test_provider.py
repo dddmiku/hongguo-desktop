@@ -269,6 +269,19 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(second, {**first, "offset": "10", "session_id": "fixture-server-session", "rank_version": "42"})
         self.assertEqual(third, {**second, "offset": "20"})
 
+    def test_series_ranking_continuation_survives_a_normal_reading_pause(self):
+        self.sdk.api = Mock(side_effect=[self.ranking_page(12345678, more=True, next_offset=10),
+                                          self.ranking_page(23456789, next_offset=20)])
+        first = self.provider.rank("recommend", "series")
+        self.assertTrue(first["cursor"])
+        # A pause longer than the old 15-minute token lifetime must not turn a
+        # valid next-page click into "ranking updated, refresh to continue".
+        import provider as provider_module
+        self.assertGreaterEqual(provider_module.PAGINATION_TTL_SECONDS, 3600)
+        continued = self.provider.rank("recommend", "series", first["cursor"])
+        self.assertEqual([row["id"] for row in continued["items"]], ["23456789"])
+        self.assertFalse(continued["hasMore"])
+
     def test_series_ranking_route_rejects_cross_board_and_forged_cursors(self):
         self.sdk.api = Mock(return_value=self.ranking_page(12345678, more=True, next_offset=10))
         with TestClient(create_app(self.provider, "a" * 64)) as client:

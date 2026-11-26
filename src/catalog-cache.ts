@@ -17,11 +17,15 @@ function series(value: Series): Series | null {
   const names = (value: unknown) => Array.isArray(value) ? value.filter(i => typeof i === 'string').slice(0, 20).map(i => i.slice(0, 80)) : [];
   return { id: String(value.id), title: text(value.title), cover: /^https?:\/\//.test(value.cover || '') ? text(value.cover, 3000) : '', intro: text(value.intro, 3000), totalEpisodes: Number.isFinite(value.totalEpisodes) ? Math.max(0, value.totalEpisodes) : 0, tags: names(value.tags), actors: names(value.actors), ...(value.score ? { score: text(value.score, 30) } : {}) };
 }
-function clean(data: CatalogResult): CatalogResult {
+function clean(data: CatalogResult, continuation = true): CatalogResult {
   const options = (rows: unknown) => Array.isArray(rows) ? rows.slice(0, 160).filter(row => row && typeof row.id === 'string' && typeof row.name === 'string').map(row => ({ id: row.id.slice(0, 80), name: row.name.slice(0, 80) })) : [];
   const groups = (rows: CatalogFilterGroup[] = []) => rows.slice(0, 20).filter(f => typeof f.type === 'string').map(f => ({ type: f.type.slice(0, 80), name: typeof f.name === 'string' ? f.name.slice(0, 80) : undefined, items: options(f.items) }));
   const filters: CatalogFilters | undefined = data.filters ? Array.isArray(data.filters) ? groups(data.filters) : { themeOptions: options(data.filters.themeOptions), themes: Array.isArray(data.filters.themes) ? data.filters.themes.filter(s => typeof s === 'string').slice(0, 80).map(s => s.slice(0, 80)) : [], groups: groups(data.filters.groups) } : undefined;
-  return { items: (data.items || []).map(series).filter((item): item is Series => !!item), hasMore: !!data.hasMore, cursor: typeof data.cursor === 'string' ? data.cursor.slice(0, 1024) : '', filters, updatedAt: data.updatedAt };
+  return { items: (data.items || []).map(series).filter((item): item is Series => !!item),
+    // Pagination tokens are server-bound and expire; a restored prefix must not
+    // pretend to own them. An in-memory page keeps its live continuation.
+    ...(continuation ? { hasMore: !!data.hasMore, cursor: typeof data.cursor === 'string' ? data.cursor.slice(0, 1024) : '' } : { hasMore: false, cursor: '' }),
+    filters, updatedAt: data.updatedAt };
 }
 function load() {
   if (loaded) return; loaded = true;
@@ -29,7 +33,7 @@ function load() {
     const raw = localStorage.getItem(STORAGE); if (!raw || raw.length > 700000) return;
     const rows = JSON.parse(raw);
     if (!Array.isArray(rows)) return;
-    for (const row of rows.slice(0, MAX_ENTRIES)) if (typeof row?.key === 'string' && persistable(row.key) && typeof row.at === 'number' && Date.now() - row.at < MAX_AGE && Array.isArray(row.data?.items) && row.data.items.length <= MAX_DISK_ITEMS) memory.set(row.key, { at: row.at, data: clean(row.data) });
+    for (const row of rows.slice(0, MAX_ENTRIES)) if (typeof row?.key === 'string' && persistable(row.key) && typeof row.at === 'number' && Date.now() - row.at < MAX_AGE && Array.isArray(row.data?.items) && row.data.items.length <= MAX_DISK_ITEMS) memory.set(row.key, { at: row.at, data: clean(row.data, false) });
   } catch { /* A damaged cache must never prevent browsing. */ }
 }
 function prune() {
@@ -48,6 +52,6 @@ export function writeCatalog(key: string, data: CatalogResult) {
   if (data.items.length > MAX_MEMORY_ITEMS) memory.delete(key);
   else { const safe = clean(data); memory.set(key, { at: Date.now(), data: safe }); }
   prune();
-  try { localStorage.setItem(STORAGE, JSON.stringify([...memory.entries()].filter(([key, entry]) => persistable(key) && entry.data.items.length <= MAX_DISK_ITEMS).map(([key, entry]) => ({ key, ...entry })))); } catch { /* Memory cache still serves navigation when disk storage is unavailable. */ }
+  try { localStorage.setItem(STORAGE, JSON.stringify([...memory.entries()].filter(([key, entry]) => persistable(key) && entry.data.items.length <= MAX_DISK_ITEMS).map(([key, entry]) => ({ key, at: entry.at, data: clean(entry.data, false) })))); } catch { /* Memory cache still serves navigation when disk storage is unavailable. */ }
 }
 export function clearPrivateCatalogs() { for (const key of memory.keys()) if (!persistable(key)) memory.delete(key); }

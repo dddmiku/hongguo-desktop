@@ -41,6 +41,10 @@ ACCOUNT_UID_MAX_LENGTH = 512
 QUALITIES = {"auto", "1080p", "720p", "540p", "480p", "360p"}
 SORTS = {"online_time", "hot_score", "hot_collect"}
 CODECS = {"bytevc1", "hevc", "h265", "hvc1", "avc1", "h264"}
+# A continuation token only bridges a user's next page click; the desktop UI
+# refreshes itself when a token does expire, so keep it alive across normal
+# reading pauses without holding ranking state forever.
+PAGINATION_TTL_SECONDS = 3600
 
 
 # Fixed protocol salt for the official playback URL envelope; no account material.
@@ -518,7 +522,7 @@ class Provider:
         def load():
             continuation=None
             if cursor:
-                continuation=self.cache.get(('search-cursor',cursor),900,lambda:None)
+                continuation=self.cache.get(('search-cursor',cursor),PAGINATION_TTL_SECONDS,lambda:None)
                 if not continuation or continuation['query']!=query:
                     raise ProviderError('CURSOR_EXPIRED','搜索结果已更新，请刷新后继续',400)
             old=continuation or {'offset':0,'passback':'','search_id':'','seen':[]}
@@ -547,7 +551,7 @@ class Provider:
                     next_cursor=secrets.token_hex(12)
                     next_state={'query':query,'offset':response['offset'],'passback':response['passback'],
                                 'search_id':response['search_id'],'seen':list(seen)}
-                    self.cache.get(('search-cursor',next_cursor),900,lambda:next_state)
+                    self.cache.get(('search-cursor',next_cursor),PAGINATION_TTL_SECONDS,lambda:next_state)
             warning='' if response.get('complete',True) else '部分搜索结果暂未补齐，可刷新重新查询'
             if response['hasMore'] and not items:
                 warning='搜索服务重复返回已有结果，已保留作品，可刷新重试'
@@ -599,7 +603,7 @@ class Provider:
         def load():
             old = None
             if cursor:
-                old = self.cache.get(("series-rank-cursor", cursor), 900, lambda: None)
+                old = self.cache.get(("series-rank-cursor", cursor), PAGINATION_TTL_SECONDS, lambda: None)
                 if not old or old["board"] != board:
                     raise ProviderError("CURSOR_EXPIRED", "榜单已更新，请刷新后继续", 400)
             seen = set(old["seen"]) if old else set()
@@ -626,7 +630,7 @@ class Provider:
                 else:
                     next_cursor = secrets.token_hex(12)
                     state = {"board": board, "seen": list(seen), "continuation": continuation}
-                    self.cache.get(("series-rank-cursor", next_cursor), 900, lambda: state)
+                    self.cache.get(("series-rank-cursor", next_cursor), PAGINATION_TTL_SECONDS, lambda: state)
             return {"items": items, "hasMore": has_more, "cursor": next_cursor,
                     **({"warning": warning} if warning else {})}
         return self.cache.get(key, 120, load, cacheable=lambda result: "warning" not in result)
@@ -653,7 +657,7 @@ class Provider:
         return {"items": [], "filters": {"themes": [item["name"] for item in themes],
                                             "themeOptions": themes, "groups": groups}}
 
-    def browse(self, genre="short_play", sort="hot_score", theme="", setting="", background="", cursor=""):
+    def browse(self, genre="short_play", sort="hot_score", theme="", setting="", background="", cursor="", refresh=False):
         self._genre(genre)
         if sort not in SORTS or any(not isinstance(value, str) or len(value) > 80 for value in (theme, setting, background, cursor)):
             raise ProviderError("INPUT_INVALID", "筛选条件不正确", 400)
@@ -667,7 +671,7 @@ class Provider:
         def read():
             offset, shown = 0, []
             if cursor:
-                continuation = self.cache.get(("browse-cursor", cursor), 900, lambda: None)
+                continuation = self.cache.get(("browse-cursor", cursor), PAGINATION_TTL_SECONDS, lambda: None)
                 if not continuation or continuation["scope"] != scope:
                     raise ProviderError("CURSOR_EXPIRED", "片单已更新，请刷新后继续浏览", 400)
                 offset, shown = continuation["offset"], continuation["shown"]
@@ -683,11 +687,14 @@ class Provider:
             next_cursor = ""
             if has_more and items:
                 next_cursor = secrets.token_hex(12)
-                self.cache.get(("browse-cursor", next_cursor), 900, lambda: {"scope": scope,
+                self.cache.get(("browse-cursor", next_cursor), PAGINATION_TTL_SECONDS, lambda: {"scope": scope,
                     "offset": data["offset"], "shown": data["shown"]})
             return {"items": items, "filters": filters, "hasMore": has_more and bool(items), "cursor": next_cursor}
 
-        return self.cache.get(("browse", *scope, cursor), 120, read)
+        key = ("browse", *scope, cursor)
+        if refresh:
+            self.cache.invalidate(key)
+        return self.cache.get(key, 120, read)
 
     def detail(self, series_id):
         sid = identifier(series_id)

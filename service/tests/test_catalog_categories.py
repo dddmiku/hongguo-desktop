@@ -55,6 +55,14 @@ class CategoryTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 'CURSOR_EXPIRED')
         self.assertEqual(self.sdk.browse_page.call_count, 1)
 
+    def test_expired_continuation_recovery_refreshes_the_same_filtered_first_page(self):
+        first = self.provider.browse(theme='cate_5000')
+        self.assertTrue(first['cursor'])
+        refreshed = self.provider.browse(theme='cate_5000', refresh=True)
+        self.assertEqual(self.sdk.browse_page.call_count, 2)
+        self.assertEqual(self.sdk.browse_page.call_args.kwargs['theme'], 'cate_5000')
+        self.assertEqual(self.sdk.browse_page.call_args.kwargs['offset'], 0)
+
     def test_unknown_or_old_dimension_id_never_fetches_a_fake_catalog(self):
         with self.assertRaises(ProviderError):
             self.provider.browse(theme='cate_79')

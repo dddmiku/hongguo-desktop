@@ -38,13 +38,13 @@ describe('公开片单缓存', () => {
     vi.resetModules(); cache = await import('./catalog-cache');
     expect(cache.readCatalog(key)).toBeNull();
   });
-  it('恰好160部的完整分页前缀及匹配游标可以在重启后恢复', async () => {
+  it('恰好160部的完整片单可恢复，但一次性分页游标不跨重启', async () => {
     let cache = await import('./catalog-cache');
     const key = '/catalog/rank?board=new&genre=series';
     const items = Array.from({ length: 160 }, (_, index) => ({ ...data.items[0], id: String(22345678 + index) }));
     cache.writeCatalog(key, { items, hasMore: true, cursor: 'after-160' });
     vi.resetModules(); cache = await import('./catalog-cache');
-    expect(cache.readCatalog(key)).toMatchObject({ items, hasMore: true, cursor: 'after-160' });
+    expect(cache.readCatalog(key)).toMatchObject({ items, hasMore: false, cursor: '' });
   });
   it('片单超过内存容量时整条退出缓存，不能继续恢复过期前缀或游标', async () => {
     let cache = await import('./catalog-cache');
@@ -66,5 +66,18 @@ describe('公开片单缓存', () => {
     storage.set('hongguo:public-catalog-v2', JSON.stringify([{ key, at: Date.now(), data: { items: Array.from({ length: 200 }, (_, index) => ({ ...data.items[0], id: String(42345678 + index) })), hasMore: true, cursor: 'after-200' } }]));
     const cache = await import('./catalog-cache');
     expect(cache.readCatalog(key)).toBeNull();
+  });
+});
+import {readCatalog,writeCatalog} from './catalog-cache';
+describe('片单缓存不落盘一次性分页令牌',()=>{
+  it('显示缓存仍在，恢复后的分页游标为空',async()=>{
+    const key='/catalog/rank?board=recommend&genre=series';
+    const item={id:'12345678',title:'缓存剧',cover:'',intro:'',totalEpisodes:1,tags:[],actors:[]};
+    writeCatalog(key,{items:[item],hasMore:true,cursor:'one-time-token'});
+    vi.resetModules();
+    const restored=(await import('./catalog-cache')).readCatalog(key);
+    expect(restored?.items).toHaveLength(1);
+    expect(restored?.hasMore).toBe(false);
+    expect(restored?.cursor).toBe('');
   });
 });

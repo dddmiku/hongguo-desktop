@@ -422,6 +422,7 @@ kbd { font:inherit; }
 .catalog-status{max-width:220px;color:var(--muted);font-size:11px;line-height:1.6;text-align:right}
 .catalog-warning{display:flex;align-items:center;justify-content:space-between;gap:15px;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 16px;margin-top:22px;color:var(--muted);font-size:12px;line-height:1.7}
 .catalog-warning>.btn{flex-shrink:0}
+.catalog-recovered{margin:18px 0 0;color:var(--muted);font-size:12px}
 .phone-input>span{flex:0 0 44px;padding-left:14px;white-space:nowrap}
 .phone-input .field{min-width:0;flex:1;outline:none;padding-left:8px}
 .phone-input:focus-within{box-shadow:0 0 0 2px rgba(var(--brand-rgb),.12)}

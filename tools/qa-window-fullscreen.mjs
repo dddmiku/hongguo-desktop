@@ -248,7 +248,26 @@ try {
   await hover(); await page.getByTitle('画中画置顶小窗', { exact: true }).click();
   await page.waitForFunction(() => document.querySelector('.player-pip'));
   await page.waitForTimeout(350);
-  const pipState = await instance.evaluate(({ BrowserWindow, screen }) => { const w = BrowserWindow.getAllWindows()[0]; return { always: w.isAlwaysOnTop(), bounds: w.getBounds(), normal: w.getNormalBounds(), maximized: w.isMaximized(), work: screen.getPrimaryDisplay().workArea }; });
+  // Windows reports isAlwaysOnTop()=false for a hidden window even when the
+  // topmost flag is set. Briefly reveal this isolated test window so the native
+  // assertion observes the real state, then hide it again.
+  // Renderer activation can race the 350ms poll above; wait for the real
+  // native topmost flag before asserting, then briefly show the isolated test
+  // window because Windows reports false for hidden topmost windows.
+  await instance.evaluate(async ({ BrowserWindow }) => {
+    const w = BrowserWindow.getAllWindows()[0];
+    const deadline = Date.now() + 2500;
+    while (!w.isAlwaysOnTop() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+  });
+  const pipState = await instance.evaluate(async ({ BrowserWindow, screen }) => {
+    const w = BrowserWindow.getAllWindows()[0];
+    w.show();
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const state = { always: w.isAlwaysOnTop(), bounds: w.getBounds(), normal: w.getNormalBounds(), maximized: w.isMaximized(), work: screen.getPrimaryDisplay().workArea, visible: w.isVisible() };
+    // Do not hide: hidden playback is paused by design, and the next assertion
+    // needs the isolated mini window in its real playing state.
+    return state;
+  });
   const expectedPipWidth = Math.min(480, pipState.work.width - 24);
   check('画中画窗口置顶且缩小到右下角', pipState.always && !pipState.maximized && Math.abs(pipState.bounds.width - expectedPipWidth) < 2 && Math.abs(pipState.bounds.height - Math.round(expectedPipWidth * 9 / 16)) < 2 && pipState.bounds.x + pipState.bounds.width <= pipState.work.x + pipState.work.width + 1 && pipState.bounds.y + pipState.bounds.height <= pipState.work.y + pipState.work.height + 1, pipState);
   check('画中画期间播放保持且画面仍在解码', await page.locator('video[data-active=true]').evaluate(v => v.videoWidth > 0 && !v.paused));

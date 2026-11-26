@@ -1,17 +1,34 @@
 import {describe,it,expect} from 'vitest';
-import {miniWindowBounds,visibleBounds} from './pip-window';
-
-describe('mini-window placement',()=>{
-  it('keeps a mini window on the selected monitor despite an offscreen parent',()=>{
-    expect(miniWindowBounds({x:2360,y:1200,width:1000,height:700},{x:0,y:0,width:2560,height:1400}))
-      .toEqual({x:2080,y:1130,width:480,height:270});
+import type {BrowserWindow} from 'electron';
+import {PipWindow} from './pip-window';
+const work={x:0,y:0,width:2560,height:1400};
+function windowMock(){
+  const state={bounds:{x:100,y:100,width:960,height:680},normal:{x:100,y:100,width:960,height:680},maximized:false,full:false,topmost:false,minimum:[940,640],maximizable:true};
+  return {state,window:{
+    getBounds:()=>state.bounds,getNormalBounds:()=>state.normal,isMaximized:()=>state.maximized,isFullScreen:()=>state.full,
+    isAlwaysOnTop:()=>state.topmost,getMinimumSize:()=>state.minimum,isMaximizable:()=>state.maximizable,
+    unmaximize:()=>{state.maximized=false;},setFullScreen:(v:boolean)=>{state.full=v;},setMinimumSize:()=>{},
+    setMaximizable:(v:boolean)=>{state.maximizable=v;},setBounds:(v:typeof state.bounds)=>{state.bounds=v;state.normal=v;},
+    setAlwaysOnTop:(v:boolean)=>{state.topmost=v;},maximize:()=>{state.maximized=true;},
+  }};
+}
+describe('PiP native lifecycle',()=>{
+  it('keeps topmost after a repeated enter and restores the pre-PiP state on exit',()=>{
+    const m=windowMock(),pip=new PipWindow(m.window as unknown as BrowserWindow,()=>work);
+    expect(pip.enter()).toBe(true);
+    expect(m.state.topmost).toBe(true);
+    expect(pip.enter()).toBe(true);
+    expect(m.state.topmost).toBe(true);
+    expect(pip.exit()).toBe(true);
+    expect(m.state.topmost).toBe(false);
+    expect(m.state.bounds).toEqual({x:100,y:100,width:960,height:680});
   });
-  it('uses secondary-display origin and taskbar work area, including negative coordinates',()=>{
-    const bounds=miniWindowBounds({x:-1300,y:100,width:1600,height:1000},{x:-1920,y:40,width:1920,height:1040});
-    expect(bounds).toEqual({x:-480,y:810,width:480,height:270});
+  it('restores a pre-existing topmost window instead of always clearing it',()=>{
+    const m=windowMock();m.state.topmost=true;const pip=new PipWindow(m.window as unknown as BrowserWindow,()=>work);
+    pip.enter();expect(m.state.topmost).toBe(true);pip.exit();expect(m.state.topmost).toBe(true);
   });
-  it('restores bounds to a remaining monitor if the previous monitor disconnected',()=>{
-    expect(visibleBounds({x:3000,y:200,width:1440,height:960},{x:0,y:0,width:1920,height:1040}))
-      .toEqual({x:480,y:80,width:1440,height:960});
+  it('does not duplicate work when the renderer leaves during the enter IPC',()=>{
+    const m=windowMock(),pip=new PipWindow(m.window as unknown as BrowserWindow,()=>work);
+    pip.enter();pip.exit();expect(pip.exit()).toBe(false);expect(m.state.bounds).toEqual({x:100,y:100,width:960,height:680});
   });
 });
