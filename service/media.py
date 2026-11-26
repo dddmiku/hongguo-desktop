@@ -55,6 +55,7 @@ class _Job:
     delivery: str = ""
     video_codec: str = ""
     size_bytes: int = 0
+    evicting: bool = False
 
 
 @dataclass
@@ -80,6 +81,7 @@ class MediaManager:
         if not self.token:
             raise ValueError("媒体访问凭据不能为空")
         self.guard = threading.RLock()
+        self.cache_maintenance = threading.Lock()
         self.jobs = {}
         self.sessions = {}
         self.closed = False
@@ -169,6 +171,8 @@ class MediaManager:
             if len(self.sessions) >= 256:
                 raise MediaBusy("打开的播放会话过多")
             job = self.jobs.get(key)
+            if job is not None and job.evicting:
+                raise MediaBusy("媒体缓存正在清理，请稍后重试")
             if job is not None and job.phase in ("error", "cancelled"):
                 if not job.done.is_set():
                     raise MediaBusy("上一任务正在结束，请稍后重试")
@@ -466,20 +470,37 @@ class MediaManager:
             return 0
 
     def _prune(self, clear=False):
-        with self.guard:
-            self._expire_sessions()
-            jobs = [job for job in self.jobs.values() if job.phase == "complete"]
-            total = sum(job.size_bytes for job in jobs)
-            for job in sorted(jobs, key=lambda item: item.accessed):
-                if not clear and total <= self.limit:
-                    break
-                if job.refs:
-                    continue
-                size = job.size_bytes
-                self._remove(job.directory)
-                if self.jobs.get(job.key) is job:
-                    self.jobs.pop(job.key)
-                total -= size
+        # Disk cleanup must never hold the lock used by active HLS reads. A
+        # second routine prune may skip this pass; an explicit clear waits for
+        # prior maintenance without blocking playback.
+        if not self.cache_maintenance.acquire(blocking=clear):
+            return
+        try:
+            with self.guard:
+                self._expire_sessions()
+                jobs = sorted((job for job in self.jobs.values() if job.phase == "complete"),
+                              key=lambda item: item.accessed)
+                total = sum(job.size_bytes for job in jobs)
+            for job in jobs:
+                with self.guard:
+                    if not clear and total <= self.limit:
+                        break
+                    if self.jobs.get(job.key) is not job or job.refs:
+                        continue
+                    # Do not grant a new lease while its files are disappearing.
+                    # The caller receives the existing retryable MEDIA_BUSY.
+                    job.evicting = True
+                try:
+                    self._remove(job.directory)
+                    with self.guard:
+                        if self.jobs.get(job.key) is job:
+                            self.jobs.pop(job.key)
+                        total -= job.size_bytes
+                finally:
+                    with self.guard:
+                        job.evicting = False
+        finally:
+            self.cache_maintenance.release()
 
     def cache_status(self):
         self._prune()

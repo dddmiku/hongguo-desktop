@@ -16,6 +16,7 @@ type Operation<T> = { index:number;target: PlaybackTarget; warm: boolean; retryW
 export class SeamlessSwitcher<T extends PreparedDeck> {
   current: T | null = null;
   private pending: Operation<T> | null = null;
+  private selection=0;
   private disposed = false;
   private available: Promise<void>[] = [Promise.resolve(), Promise.resolve()];
   private releases=new WeakMap<T,Promise<void>>();
@@ -67,10 +68,11 @@ export class SeamlessSwitcher<T extends PreparedDeck> {
   async select(target: PlaybackTarget, automatic = false, force = false,allowPresent:()=>boolean=()=>true): Promise<T | null> {
     if (this.disposed||!allowPresent()) return null;
     if (!force && this.current && same(this.current.target, target)) return this.current;
+    const selection=++this.selection;
     const op = this.operation(target, false, automatic);
     try {
       const deck = await op.promise;
-      if (this.disposed || this.pending !== op || op.abort.signal.aborted) return null;
+      if (this.disposed || selection!==this.selection || this.pending !== op || op.abort.signal.aborted) return null;
       if(!allowPresent()){this.cancelPending();return null;}
       const previous = this.current;
       this.current = deck;
@@ -79,7 +81,7 @@ export class SeamlessSwitcher<T extends PreparedDeck> {
       if (previous) this.available[previous.index] = this.adapter.afterPresent().then(() => this.release(previous)).then(() => {});
       return deck;
     } catch (error) {
-      if (this.disposed || this.pending !== op || op.abort.signal.aborted) return null;
+      if (this.disposed || selection!==this.selection || this.pending !== op || op.abort.signal.aborted) return null;
       this.pending = null;
       throw error;
     }

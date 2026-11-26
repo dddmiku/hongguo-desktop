@@ -10,6 +10,7 @@ import {sanitizePlaybackTraceSnapshot,type PlaybackTraceSnapshot} from '../share
 import {normalizeMediaRequestFailure,type MediaRequestResult} from '../shared/media-request';
 import { readLegacy } from './migration';
 import { readUpdateInfo, UpdateInstaller } from './updater';
+import {PipWindow} from './pip-window';
 import type { HistoryItem, HistoryQuery, Library, PlaybackProgress, Series, Session, Settings } from '../shared/contracts';
 
 app.setName('红果桌面');
@@ -19,7 +20,7 @@ const startHidden=backgroundQA||process.argv.includes('--start-hidden');
 let window:BrowserWindow, tray:Tray, store:Store, supervisor:Supervisor, quitting=false,currentUid='local';
 let identityRevision = 0;
 let librarySync:LibrarySyncController;
-let pipState:{bounds:Electron.Rectangle;maximized:boolean}|null=null;
+let pipWindow:PipWindow;
 let playbackDiagnostics:PlaybackDiagnostics;
 const bootStartedAtMs=Date.now();let rendererContextGeneration=0;
 const savePlaybackSnapshot=(snapshot:PlaybackTraceSnapshot,observer:'renderer'|'main')=>{
@@ -110,7 +111,8 @@ async function boot(){
   supervisor=new Supervisor(root,runtime,data,{diagnostic:event=>backendTrace.record({...event,observer:'main'})});
   librarySync=new LibrarySyncController({load:loadLibrary,library:()=>store.library(currentUid),publish:()=>emitLibrary()});
   window=new BrowserWindow({width:1440,height:960,minWidth:940,minHeight:640,show:!startHidden,frame:false,title:'红果桌面',backgroundColor:'#101014',icon:windowIcon(),webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true,...(backgroundQA?{backgroundThrottling:false,offscreen:true}:{})}});
-  window.webContents.on('did-start-navigation',(_event,_url,isInPlace,isMainFrame)=>{if(isMainFrame&&!isInPlace)rendererContextGeneration++;});
+  pipWindow=new PipWindow(window,bounds=>screen.getDisplayMatching(bounds).workArea);
+  window.webContents.on('did-start-navigation',(_event,_url,isInPlace,isMainFrame)=>{if(isMainFrame&&!isInPlace){rendererContextGeneration++;pipWindow.exit();}});
   if(backgroundQA)window.webContents.setFrameRate(60);
   librarySync.setActive(backgroundQA||window.isVisible());
   window.webContents.setWindowOpenHandler(()=>({action:'deny'}));window.webContents.on('will-navigate',(e)=>e.preventDefault());
@@ -172,23 +174,8 @@ async function boot(){
     else if(action==='quit')app.quit();
     else if(action==='fullscreen')window.setFullScreen(!window.isFullScreen());
     else if(action==='exitfullscreen'){const fullscreen=window.isFullScreen();if(fullscreen)window.setFullScreen(false);return fullscreen;}
-    else if(action==='pip'){
-      if(!pipState){pipState={bounds:window.getNormalBounds(),maximized:window.isMaximized()};}
-      if(pipState.maximized)window.unmaximize();
-      if(window.isFullScreen())window.setFullScreen(false);
-      const workArea=screen.getPrimaryDisplay().workAreaSize;
-      const width=Math.min(480,workArea.width-24),height=Math.round(width*9/16);
-      const x=pipState.bounds.x+Math.max(0,pipState.bounds.width-width),y=pipState.bounds.y+Math.max(0,pipState.bounds.height-height);
-      window.setMinimumSize(280,158);window.setResizable(true);window.setBounds({x,y,width,height});window.setAlwaysOnTop(true,'screen-saver');
-      return true;
-    }
-    else if(action==='exitpip'){
-      if(!pipState)return false;
-      const bounds=pipState.bounds;const maximized=pipState.maximized;pipState=null;
-      window.setAlwaysOnTop(false);window.setMinimumSize(940,640);window.setResizable(true);window.setBounds(bounds);
-      if(maximized)window.maximize();
-      return true;
-    }
+    else if(action==='pip')return pipWindow.enter();
+    else if(action==='exitpip')return pipWindow.exit();
   });
   handle('external:open',async(url:string)=>{const u=new URL(url);if(u.protocol!=='https:'||!['github.com','gh-proxy.com'].includes(u.hostname))throw new Error('不支持的链接');await shell.openExternal(url);});
   handle('diagnostics:export',async()=>{const source=await supervisor.diagnostics();const choice=await dialog.showSaveDialog(window,{title:'导出诊断',defaultPath:'红果桌面-诊断.jsonl'});if(choice.canceled||!choice.filePath)return '';const events=[...(await playbackDiagnostics.read()),...(await playbackDiagnostics.readLatestFailure())];await fs.writeFile(choice.filePath,(await fs.readFile(source,'utf8'))+'\n'+events.map(event=>JSON.stringify(event)).join('\n'),'utf8');return choice.filePath;});

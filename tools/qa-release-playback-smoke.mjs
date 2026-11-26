@@ -6,7 +6,9 @@ import {promisify} from 'node:util';
 import {createHash} from 'node:crypto';
 import path from 'node:path';
 
-const root=path.resolve(process.cwd()),expected='1.5.7',argument=process.argv.find(value=>value.startsWith('--exe='));
+const root=path.resolve(process.cwd()),argument=process.argv.find(value=>value.startsWith('--exe='));
+const expected=process.argv.find(value=>value.startsWith('--version='))?.slice(10)||JSON.parse(await readFile(path.join(root,'package.json'),'utf8')).version;
+if(!/^\d+\.\d+\.\d+$/.test(expected))throw new Error('Invalid expected version');
 const executable=argument?argument.slice(6):path.join(process.env.ProgramFiles,'hongguo-desktop','红果桌面.exe');
 if(!path.isAbsolute(executable)||!(await lstat(executable)).isFile())throw new Error('Smoke requires an absolute existing EXE path');
 const label=path.resolve(executable).startsWith(path.join(root,'release','win-unpacked')+path.sep)?'unpacked':path.resolve(executable).startsWith(path.join(process.env.ProgramFiles,'hongguo-desktop')+path.sep)?'installed':'custom';
@@ -21,7 +23,7 @@ if(previous){
 await mkdir(profile);await writeFile(owner,JSON.stringify({kind:'release-playback-smoke'}));
 const exec=promisify(execFile),ps=path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
 const metadata=await exec(ps,['-NoProfile','-NonInteractive','-Command','(Get-Item -LiteralPath $env:HG_SMOKE_EXE).VersionInfo.ProductVersion'],{windowsHide:true,env:{...process.env,HG_SMOKE_EXE:executable}});
-if(metadata.stdout.trim()!==expected+'.0')throw new Error('Packaged EXE is not 1.5.7.0; wait for the build to finish');
+if(metadata.stdout.trim()!==expected+'.0')throw new Error('Packaged EXE does not match the expected version; wait for the build to finish');
 async function productionPids(){
  const code='$r=(Join-Path $env:ProgramFiles "hongguo-desktop")+"\\"; ConvertTo-Json -InputObject @((Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -and $_.ExecutablePath.StartsWith($r,[StringComparison]::OrdinalIgnoreCase)}).ProcessId) -Compress';
  const result=await exec(ps,['-NoProfile','-NonInteractive','-Command',code],{windowsHide:true,timeout:15000});return JSON.parse(result.stdout.trim());

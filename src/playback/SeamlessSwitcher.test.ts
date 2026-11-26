@@ -10,6 +10,18 @@ function fixture(){
 }
 const tick=async()=>{await Promise.resolve();await Promise.resolve();};
 describe('解码后原子切集',()=>{
+  it('手动选择接管同目标自动切集，旧自动提交守卫失效不能取消新选择',async()=>{
+    const f=fixture(),first=f.controller.select(target(1));await tick();f.resolve(0);await first;
+    let automaticAllowed=true;
+    const automatic=f.controller.select(target(2),true,false,()=>automaticAllowed);await tick();
+    automaticAllowed=false;
+    const manual=f.controller.select(target(2),false,false,()=>true);
+    const next=f.resolve(1);
+    await expect(automatic).resolves.toBeNull();
+    await expect(manual).resolves.toBe(next);
+    expect(f.requests[1].signal.aborted).toBe(false);
+    expect(f.controller.current).toBe(next);expect(next.release).not.toHaveBeenCalled();f.paint();await f.controller.close();
+  });
   it('新首帧准备之前不提交或释放当前画面，提交后等待绘制才释放旧槽',async()=>{const f=fixture();const first=f.controller.select(target(1));await tick();const old=f.resolve(0);await first;const second=f.controller.select(target(2));await tick();expect(f.controller.current).toBe(old);expect(old.release).not.toHaveBeenCalled();expect(f.events).toEqual(['present:1:was:0']);const next=f.resolve(1);await second;expect(f.controller.current).toBe(next);expect(old.release).not.toHaveBeenCalled();f.paint();await tick();expect(f.events).toEqual(['present:1:was:0','present:2:was:1','release:1']);});
   it('切集时复用进行中的完整预热，且不重新申请解码槽',async()=>{const f=fixture();const first=f.controller.select(target(1));await tick();f.resolve(0);await first;const warming=f.controller.warm(target(2));await tick();expect(f.requests[1].prewarm).toBe(true);expect(f.controller.current?.target.episode).toBe(1);const switching=f.controller.select(target(2),true);await tick();expect(f.requests).toHaveLength(2);expect(f.requests[1].prewarm).toBe(true);const warm=f.resolve(1);await expect(warming).resolves.toBe(warm);await expect(switching).resolves.toBe(warm);expect(f.controller.current).toBe(warm);f.paint();});
   it('快速连续切集取消过期准备，旧画面保持直到最后请求已解码',async()=>{const f=fixture();const first=f.controller.select(target(1));await tick();const old=f.resolve(0);await first;const stale=f.controller.select(target(2));await tick();const last=f.controller.select(target(3));await tick();expect(f.requests[1].signal.aborted).toBe(true);const discarded=f.resolve(1);await stale;await tick();expect(discarded.release).toHaveBeenCalledOnce();expect(f.controller.current).toBe(old);f.resolve(2);await last;expect(f.controller.current?.target.episode).toBe(3);expect(f.events).not.toContain('present:2:was:1');f.paint();});
@@ -112,7 +124,7 @@ describe('下一集预热的有界网络恢复',()=>{
     await tick();f.requests[1].reject(new TypeError('Failed to fetch'));await vi.advanceTimersByTimeAsync(1000);
     f.requests[2].reject(new TypeError('Failed to fetch'));await vi.advanceTimersByTimeAsync(500);
     const first=f.controller.select(target(2),true),duplicate=f.controller.select(target(2),true);
-    const failures=Promise.all([expect(first).rejects.toThrow('Failed to fetch'),expect(duplicate).resolves.toBeNull()]);
+    const failures=Promise.all([expect(first).resolves.toBeNull(),expect(duplicate).rejects.toThrow('Failed to fetch')]);
     await vi.advanceTimersByTimeAsync(2499);expect(f.requests).toHaveLength(3);
     await vi.advanceTimersByTimeAsync(1);expect(f.requests).toHaveLength(4);
     f.requests[3].reject(new TypeError('Failed to fetch'));await failures;await expect(warming).resolves.toBeNull();
@@ -122,7 +134,7 @@ describe('下一集预热的有界网络恢复',()=>{
     vi.useFakeTimers();const f=await playing(),warming=f.controller.warm(target(2));
     await tick();f.requests[1].reject(new TypeError('Failed to fetch'));await vi.advanceTimersByTimeAsync(250);
     const automatic=f.controller.select(target(2),true),manual=f.controller.select(target(2),false);
-    const failures=Promise.all([expect(automatic).rejects.toThrow('Failed to fetch'),expect(manual).resolves.toBeNull()]);
+    const failures=Promise.all([expect(automatic).resolves.toBeNull(),expect(manual).rejects.toThrow('Failed to fetch')]);
     await vi.advanceTimersByTimeAsync(0);expect(f.requests).toHaveLength(3);f.requests[2].reject(new TypeError('Failed to fetch'));
     await failures;await warming;await vi.advanceTimersByTimeAsync(60000);expect(f.requests).toHaveLength(3);await f.controller.close();
   });

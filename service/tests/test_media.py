@@ -179,6 +179,23 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(third["phase"], "complete")
         self.assertEqual(provider.calls, 1)
 
+    def test_cleared_unused_episode_can_be_prepared_again(self):
+        provider = Provider(self.source)
+        manager = self.manager(provider)
+        first = manager.create("12345678", 1, "1080p")
+        original = manager.sessions[first["id"]].job
+        self.assertTrue(original.done.wait(8))
+        self.assertEqual(original.phase, "complete")
+        manager.cancel(first["id"])
+        self.assertEqual(manager.clear_cache()["entries"], 0)
+        second = manager.create("12345678", 1, "1080p")
+        replacement = manager.sessions[second["id"]].job
+        self.assertIsNot(replacement, original)
+        self.assertTrue(replacement.done.wait(8))
+        self.assertEqual(manager.get(second["id"])["phase"], "complete")
+        self.assertEqual(provider.calls, 2)
+        self.assertIn(b"#EXT-X-ENDLIST", manager.read_file(second["id"], "index.m3u8"))
+
     def test_cancel_terminates_own_running_encoder(self):
         manager = self.manager()
         manager._command = lambda source, directory: [sys.executable, "-c", "import time;time.sleep(60)"]

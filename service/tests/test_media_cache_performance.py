@@ -13,7 +13,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "service"))
-from media import MediaManager, _Job, _Session, _OWNER
+from media import MediaBusy, MediaManager, _Job, _Session, _OWNER
 
 
 class MediaCachePerformanceTests(unittest.TestCase):
@@ -28,7 +28,7 @@ class MediaCachePerformanceTests(unittest.TestCase):
         shutil.rmtree(self.work)
 
     def completed(self, episode):
-        key = hashlib.sha256(str(episode).encode()).hexdigest()
+        key = hashlib.sha256(f"{_OWNER}:12345678:{episode}:1080p".encode()).hexdigest()
         folder = self.manager.root / (key + ".part")
         folder.mkdir()
         (folder / "owner").write_text(_OWNER)
@@ -138,6 +138,100 @@ class MediaCachePerformanceTests(unittest.TestCase):
         self.manager = MediaManager(None, self.work, ROOT / "runtime/ffmpeg.exe", "fixture-only")
         with patch.object(self.manager, "_size", side_effect=AssertionError("unexpected completed rescan")):
             self.assertEqual(self.manager.cache_status()["bytes"], expected)
+
+    def test_slow_unused_cache_removal_does_not_block_the_playing_episode(self):
+        current = self.completed(1)
+        unused = self.completed(2)
+        self.manager.cancel(unused.id)
+        entered, release = threading.Event(), threading.Event()
+        original = self.manager._remove
+
+        def slow_remove(directory):
+            if directory == unused.job.directory:
+                entered.set()
+                if not release.wait(3):
+                    raise AssertionError("cache removal gate was not released")
+            original(directory)
+
+        with patch.object(self.manager, "_remove", side_effect=slow_remove):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                clearing = pool.submit(self.manager.clear_cache)
+                self.assertTrue(entered.wait(1))
+                reading = pool.submit(self.manager.read_file, current.id, "seg000000.m4s")
+                try:
+                    self.assertEqual(reading.result(timeout=.3), b"fixture-segment")
+                finally:
+                    release.set()
+                    clearing.result(timeout=2)
+        self.assertTrue(current.job.directory.is_dir())
+        self.assertFalse(unused.job.directory.exists())
+
+    def test_new_session_cannot_claim_a_cache_entry_while_it_is_being_deleted(self):
+        unused = self.completed(1)
+        self.manager.cancel(unused.id)
+        entered, release = threading.Event(), threading.Event()
+        original = self.manager._remove
+
+        def slow_remove(directory):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("cache removal gate was not released")
+            original(directory)
+
+        with patch.object(self.manager, "_remove", side_effect=slow_remove):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                clearing = pool.submit(self.manager.clear_cache)
+                self.assertTrue(entered.wait(1))
+                opening = pool.submit(self.manager.create, "12345678", 1, "1080p")
+                try:
+                    with self.assertRaises(MediaBusy):
+                        opening.result(timeout=.3)
+                finally:
+                    release.set()
+                    clearing.result(timeout=2)
+        self.assertNotIn(unused.job.key, self.manager.jobs)
+
+    def test_cleanup_failure_releases_maintenance_and_session_reservation(self):
+        unused = self.completed(1)
+        self.manager.cancel(unused.id)
+        with patch.object(self.manager, "_remove", side_effect=PermissionError("fixture locked")):
+            with self.assertRaises(PermissionError):
+                self.manager.clear_cache()
+        # A Windows sharing failure must not strand the entry in MEDIA_BUSY.
+        claimed = self.manager.create("12345678", 1, "1080p")
+        self.assertEqual(claimed["phase"], "complete")
+        self.assertEqual(self.manager.read_file(claimed["id"], "seg000000.m4s"), b"fixture-segment")
+        self.manager.cancel(claimed["id"])
+        self.manager.clear_cache()
+        self.assertFalse(unused.job.directory.exists())
+
+    def test_pressure_cleanup_allows_reads_and_does_not_delete_active_files(self):
+        current, unused = self.completed(1), self.completed(2)
+        self.manager.cancel(unused.id)
+        self.manager.limit = current.job.size_bytes
+        entered, release = threading.Event(), threading.Event()
+        original = self.manager._remove
+
+        def slow_remove(directory):
+            self.assertEqual(directory, unused.job.directory)
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("pressure cleanup gate was not released")
+            original(directory)
+
+        with patch.object(self.manager, "_remove", side_effect=slow_remove):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                pruning = pool.submit(self.manager.cache_status)
+                self.assertTrue(entered.wait(1))
+                reading = pool.submit(self.manager.read_file, current.id, "seg000000.m4s")
+                try:
+                    self.assertEqual(reading.result(timeout=.3), b"fixture-segment")
+                finally:
+                    release.set()
+                    status = pruning.result(timeout=2)
+        self.assertEqual(status["bytes"], current.job.size_bytes)
+        self.assertEqual(status["active"], 1)
+        self.assertTrue(current.job.directory.is_dir())
 
 
 if __name__ == "__main__":

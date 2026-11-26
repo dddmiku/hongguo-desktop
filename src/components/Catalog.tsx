@@ -23,15 +23,16 @@ export function SeriesCard({ series, index, favorite, onOpen, onFavorite }: { se
 
 export default function Catalog({ page, query, genre, accountKey, favorites, history, onOpen, onFavorite, onGenre, onReady, onNavigate }: Props) {
   // 只有用户主动点过排行榜页签，才记忆其选择；否则排行榜固定默认第一个页签。
-  const rankPicked = useRef<RankGenre | null>(null);
-  const rankGenre = page === 'rank' ? (rankPicked.current ?? rankDefaultGenre) : genre;
+  const [rankPicked, setRankPicked] = useState<RankGenre>(rankDefaultGenre);
+  const rankGenre = page === 'rank' ? rankPicked : genre;
   const seriesRank = page === 'rank' && rankGenre === 'series';
   const preferenceKey = `${page}:${page === 'rank' ? rankGenre : genre}`;
   const [selection, setSelection] = useState(() => ({ scope: preferenceKey, value: readCatalogSelection(preferenceKey) }));
   const selected = selection.scope === preferenceKey ? selection.value : readCatalogSelection(preferenceKey);
   const changeSelection = (patch: Partial<CatalogSelection>) => { const value = { ...selected, ...patch }; saveCatalogSelection(preferenceKey, value); setSelection({ scope: preferenceKey, value }); };
   const [reload, setReload] = useState(0), [filterReload, setFilterReload] = useState(0);
-  const path = catalogRoute(page, query, genre, selected, rankGenre), cacheKey = path + (page === 'recommend' ? `#account=${accountKey}` : '');
+  // A private result and its in-flight request belong to the account that opened it.
+  const path = catalogRoute(page, query, genre, selected, rankGenre), cacheKey = path + (page === 'recommend' || page === 'search' ? `#account=${accountKey}` : '');
   const initial = readCatalog(cacheKey);
   const [items, setItems] = useState<Series[]>(initial?.items || []), [loading, setLoading] = useState(true), [error, setError] = useState('');
   const [cursor, setCursor] = useState(''), [hasMore, setHasMore] = useState(false), [moreLoading, setMoreLoading] = useState(false);
@@ -98,7 +99,7 @@ export default function Catalog({ page, query, genre, accountKey, favorites, his
   const tabs: { id: RankGenre; title: string }[] = page === 'rank' ? rankOrder.map(id => ({ id, title: rankTitles[id] })) : genres;
   const activeGenre = page === 'rank' ? rankGenre : genre, boards = rankBoards(rankGenre);
   const changeGenre = (value: RankGenre) => {
-    if (page === 'rank') rankPicked.current = value;
+    if (page === 'rank') setRankPicked(value);
     if (value !== 'series') onGenre(value);
   };
   const filterBar = page !== 'search' && <div className="catalog-filter"><div className="genre-tabs" role="tablist" aria-label="作品类型">{tabs.map(g => <button key={g.id} role="tab" aria-selected={activeGenre === g.id} className={activeGenre === g.id ? 'active' : ''} onClick={() => changeGenre(g.id)}>{g.title}</button>)}</div>{page === 'rank' && <div className="chips" role="group" aria-label="排行榜类型">{boards.map(b => <button className={`chip ${selected.board === b.id ? 'active' : ''}`} aria-pressed={selected.board === b.id} key={b.id} onClick={() => changeSelection({ board: b.id })}>{b.title}</button>)}</div>}{(page === 'browse' || filtered) && <div className="chips catalog-sorts" role="group" aria-label="片单排序">{[{ id: 'hot_score', name: '热门' }, { id: 'online_time', name: '最新' }, { id: 'hot_collect', name: '收藏最多' }].map(option => <button key={option.id} className={`chip ${selected.sort === option.id ? 'active' : ''}`} aria-pressed={selected.sort === option.id} onClick={() => changeSelection({ sort: option.id })}>{option.name}</button>)}</div>}</div>;

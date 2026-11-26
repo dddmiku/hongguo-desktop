@@ -63,7 +63,10 @@ await build({entryPoints:[path.join(root,'electron','main.ts')],outfile:path.joi
 await build({entryPoints:[path.join(root,'electron','preload.ts')],outfile:path.join(fixture,'preload.cjs'),bundle:true,platform:'node',target:'node22',format:'cjs',external:['electron']});
 await build({entryPoints:[path.join(root,'shared','media-request.ts')],outfile:path.join(fixture,'media-browser.js'),bundle:true,platform:'browser',target:'es2022',format:'iife',globalName:'MediaRequestQa'});
 const exec=promisify(execFile),powershell=path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
-const production=async()=>{const result=await exec(powershell,['-NoProfile','-NonInteractive','-Command','ConvertTo-Json -InputObject @(34216,38628 | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }) -Compress'],{windowsHide:true});return JSON.parse(result.stdout.trim());};
+const production=async()=>{
+ const script='$roots=@((Join-Path $env:ProgramFiles "hongguo-desktop"),(Join-Path $env:LOCALAPPDATA "Programs/hongguo-desktop")); $items=@(Get-CimInstance Win32_Process | Where-Object { $exe=$_.ExecutablePath; $exe -and @($roots | Where-Object { $exe.StartsWith($_+"\\",[StringComparison]::OrdinalIgnoreCase) }).Count -gt 0 } | Select-Object -ExpandProperty ProcessId); ConvertTo-Json -InputObject $items -Compress';
+ const result=await exec(powershell,['-NoProfile','-NonInteractive','-Command',script],{windowsHide:true});return JSON.parse(result.stdout.trim());
+};
 const before=await production();
 let instance,page,originalHandler,stage='launch';
 function check(name,ok,detail={}){checks.push({name,ok,detail});console.log(JSON.stringify(checks.at(-1)));if(!ok)process.exitCode=1;}
@@ -132,7 +135,7 @@ try{
 }catch(error){const flags=Object.fromEntries(['CSP','Security','newCDPSession','addScriptTag','not supported','not a function','undefined','Target closed','Execution context','disconnected','Content Security Policy'].map(word=>[word,String(error?.message).includes(word)]));checks.push({name:'隔离 media IPC E2E 失败',ok:false,errorType:error?.name||'Error',stage,flags});console.error(JSON.stringify({stage,flags}));process.exitCode=1;}
 finally{
   if(instance){if(originalHandler)await instance.evaluate(({ipcMain})=>{ipcMain.removeHandler('media:request');ipcMain.handle('media:request',globalThis.__mediaIpcQaOriginal);delete globalThis.__mediaIpcQaOriginal;}).catch(()=>{});await instance.evaluate(({app})=>app.quit()).catch(()=>{});await instance.close().catch(()=>{});}
-  const after=await production(),productionUnchanged=before.length===2&&before.every(pid=>after.includes(pid));
+  const after=await production(),productionUnchanged=before.every(pid=>after.includes(pid));
   checks.push({name:'生产应用与服务进程保持存活',ok:productionUnchanged,detail:{beforeCount:before.length,afterCount:after.length}});
   if(!productionUnchanged)process.exitCode=1;
   await writeFile(path.join(out,'result.json'),JSON.stringify({checks,pageErrorCount:errors.length,productionUnchanged,isolatedProfile:true,realSupervisor:true,realNetwork:false,loopbackFixture:true},null,2));

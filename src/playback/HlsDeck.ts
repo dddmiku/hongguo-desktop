@@ -194,10 +194,15 @@ export class HlsDeckLoader {
         };
         const stop = () => finish(aborted());
         signal.addEventListener('abort', stop, { once: true });
+        // A priming play rejection/frame can arrive after presentation or slot
+        // reuse. Only the unfinished preparation still owns permission to pause.
+        const ownsPriming=()=>!settled&&!released&&!signal.aborted&&this.decks.get(index)===deck;
+        const decoded=()=>{if(!ownsPriming())return;frameDecoded=true;video.pause();finishWhenReady();};
+        const fallback=()=>{if(!ownsPriming())return;if(video.readyState>=HTMLMediaElement.HAVE_CURRENT_DATA)decoded();else priming=false;};
         const ready = () => {
           const complete=engine?.levels[engine.currentLevel]?.details?.live===false;
           deck.duration=episodeDuration(deck.duration,target.duration,video.duration,complete);
-          if (settled || priming || signal.aborted || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth) return;
+          if (!ownsPriming() || priming || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth) return;
           if (target.start > .1) {
             const complete = engine?.levels[engine.currentLevel]?.details?.live === false;
             if (!Number.isFinite(video.duration) || !complete && video.duration < target.start + .1) return;
@@ -205,9 +210,9 @@ export class HlsDeckLoader {
             if (Math.abs(video.currentTime - start) > .1) { video.currentTime = start; return; }
           }
           priming = true;
-          if (video.requestVideoFrameCallback) frameId = video.requestVideoFrameCallback(() => {frameDecoded=true;video.pause();finishWhenReady();});
-          else requestAnimationFrame(() => { if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {frameDecoded=true;video.pause();finishWhenReady();} else priming = false; });
-          void video.play().catch(() => { if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {frameDecoded=true;video.pause();finishWhenReady();} else priming = false; });
+          if (video.requestVideoFrameCallback) frameId = video.requestVideoFrameCallback(decoded);
+          else requestAnimationFrame(fallback);
+          void video.play().catch(fallback);
         };
         for (const name of ['loadeddata', 'loadedmetadata', 'durationchange', 'canplay', 'seeked']) video.addEventListener(name, ready);
         if (Hls.isSupported()) {

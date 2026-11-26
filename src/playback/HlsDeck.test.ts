@@ -29,6 +29,120 @@ import { HlsDeckLoader } from './HlsDeck';
 
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.mocked(hardwareHevc).mockReset().mockResolvedValue(false); (Hls as any).instances = []; });
 
+describe('priming callbacks after playback ownership changes', () => {
+  function fixture(frameApi = true) {
+    vi.useFakeTimers();
+    vi.stubGlobal('HTMLMediaElement', { HAVE_METADATA: 1, HAVE_CURRENT_DATA: 2 });
+    let rejectPriming!: (error: Error) => void;
+    const primingPlay = new Promise<void>((_resolve, reject) => { rejectPriming = reject; });
+    const frames: (() => void)[] = [];
+    const paints: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => { paints.push(callback); return paints.length; }));
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    let plays = 0, sessions = 0;
+    const element = {
+      readyState: 2, videoWidth: 640, duration: 30, currentTime: 0,
+      paused: true, ended: false, playbackRate: 1,
+      buffered: { length: 1, start: () => 0, end: () => 30 },
+      style: { visibility: '' }, muted: false, volume: 1,
+      pause: vi.fn(() => { element.paused = true; }),
+      play: vi.fn(() => { element.paused = false; return ++plays === 1 ? primingPlay : Promise.resolve(); }),
+      load: vi.fn(), removeAttribute: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn(),
+      ...(frameApi ? {
+        requestVideoFrameCallback: vi.fn((callback: () => void) => { frames.push(callback); return frames.length; }),
+        cancelVideoFrameCallback: vi.fn(),
+      } : {}),
+    };
+    const video = element as unknown as HTMLVideoElement;
+    const request = vi.fn(async (_route: string, options?: { method?: string }) => options?.method === 'POST'
+      ? { id: `callback-${++sessions}`, phase: 'complete', url: `/media/callback-${sessions}.m3u8`, duration: 30, videoCodec: 'h264' }
+      : {});
+    const loader = new HlsDeckLoader([video], { request } as unknown as NativeBridge, vi.fn());
+    const target = (episode: number) => ({ seriesId: '12345678', episode, quality: '1080p', start: 0, compatible: true });
+    const prime = async (engineIndex: number) => {
+      await vi.waitFor(() => expect((Hls as any).instances).toHaveLength(engineIndex + 1));
+      (Hls as any).instances[engineIndex].emit((Hls as any).Events.MANIFEST_PARSED);
+    };
+    return { element, video, loader, target, frames, paints, prime, rejectPriming };
+  }
+
+  it('a delayed priming play rejection cannot pause the deck after its first frame was presented', async () => {
+    const f = fixture(), abort = new AbortController();
+    const preparing = f.loader.prepare(0, f.target(1), abort.signal);
+    let deck;
+    try {
+      await f.prime(0);
+      f.frames[0]();
+      deck = await preparing;
+      // The caller presents the prepared deck and resumes the same media element.
+      await deck.video.play();
+      f.element.pause.mockClear();
+      f.rejectPriming(new DOMException('Priming play was interrupted', 'AbortError'));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(f.element.pause).not.toHaveBeenCalled();
+      expect(f.element.paused).toBe(false);
+    } finally {
+      deck?.release();
+      abort.abort();
+      await preparing.catch(() => {});
+    }
+  });
+
+  it('a cancelled preparation cannot pause the replacement reusing its video slot when old play rejects', async () => {
+    const f = fixture(), firstAbort = new AbortController(), secondAbort = new AbortController();
+    const first = f.loader.prepare(0, f.target(1), firstAbort.signal).then(
+      () => 'ready', error => error.name,
+    );
+    let replacement;
+    try {
+      await f.prime(0);
+      firstAbort.abort();
+      expect(await first).toBe('AbortError');
+      const next = f.loader.prepare(0, f.target(2), secondAbort.signal);
+      await f.prime(1);
+      f.frames[1]();
+      replacement = await next;
+      await replacement.video.play();
+      f.element.pause.mockClear();
+      f.rejectPriming(new DOMException('Released media load interrupted play', 'AbortError'));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(f.element.pause).not.toHaveBeenCalled();
+      expect(f.element.paused).toBe(false);
+      expect(replacement.target.episode).toBe(2);
+    } finally {
+      replacement?.release();
+      firstAbort.abort();
+      secondAbort.abort();
+      await first;
+    }
+  });
+
+  it('the animation-frame fallback cannot pause playback after the play fallback already settled preparation', async () => {
+    const f = fixture(false), abort = new AbortController();
+    const preparing = f.loader.prepare(0, f.target(1), abort.signal);
+    let deck;
+    try {
+      await f.prime(0);
+      expect(f.paints).toHaveLength(1);
+      // With decoded data already available, the rejection fallback settles first.
+      f.rejectPriming(new DOMException('Priming play was interrupted', 'AbortError'));
+      deck = await preparing;
+      await deck.video.play();
+      f.element.pause.mockClear();
+      // The previously scheduled paint still belongs to the completed priming job.
+      f.paints[0](performance.now());
+      expect(f.element.pause).not.toHaveBeenCalled();
+      expect(f.element.paused).toBe(false);
+    } finally {
+      deck?.release();
+      abort.abort();
+      await preparing.catch(() => {});
+    }
+  });
+});
+
 describe('播放会话异步取消', () => {
   const startupVideo=()=>{
     let frames=0;
