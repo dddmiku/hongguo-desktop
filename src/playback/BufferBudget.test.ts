@@ -11,4 +11,16 @@ describe('倍速适配的播放器前向缓冲',()=>{
     expect(playbackBufferConfig(1,false)).toMatchObject({maxBufferLength:18,maxMaxBufferLength:30});
     expect(playbackBufferConfig(Number.NaN,true)).toEqual(playbackBufferConfig(1,true));
   });
+  it('前台暂停提供一分钟前向缓冲，倍速不会无限放大暂停预算',()=>{
+    for(const rate of [.75,1,3,Number.NaN]){
+      const paused=playbackBufferConfig(rate,false,true);
+      expect(paused.maxBufferLength).toBe(60);
+      expect(paused.maxMaxBufferLength).toBe(60);
+      expect(paused.backBufferLength).toBe(playbackBufferConfig(rate,false).backBufferLength);
+    }
+  });
+  it('暂停预缓冲不扩大下一集预热预算，恢复播放使用正常预算',()=>{
+    expect(playbackBufferConfig(3,true,true)).toEqual(playbackBufferConfig(3,true));
+    expect(playbackBufferConfig(3,false,false)).toEqual(playbackBufferConfig(3,false));
+  });
 });
