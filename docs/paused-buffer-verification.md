@@ -1,6 +1,6 @@
 # 暂停预缓冲修复验证
 
-日期：2026-11-28。版本：1.5.13，本地候选安装包；本轮没有安装或公开发布。
+日期：2026-11-28。版本：1.5.13，已完成本机覆盖安装；安装包尚未公开发布。
 
 ## 复现与原因
 
@@ -46,4 +46,14 @@
 
 SHA-256：`24856d2dd823fe406685ca991d0b4945f4380850fcd948dc961aa07a91567de9`。
 
-校验文件：`release/hongguo-1.5.13-SHA256.txt`。沿用原包身份与保留数据的安装器设置；本轮未进行正式覆盖安装，因此不声称已实测本轮升级后的账号、历史、收藏和设置。
+校验文件：`release/hongguo-1.5.13-SHA256.txt`。
+
+## 覆盖安装验证
+
+经用户明确授权，使用上述安装包通过 UAC 对原 `C:/Program Files/hongguo-desktop` 机级安装执行覆盖升级，未卸载或清空用户数据目录。安装器返回 0，EXE 产品版本为 1.5.13.0，卸载注册项版本为 1.5.13，安装后的 `app.asar` 与已验证的打包目录 SHA-256 一致。
+
+升级前将账号/设备/设置文件和 SQLite 一致性备份写入固定 `_work/install-upgrade-current/backup/` 槽位。安装前后 11 个数据文件摘要全部一致，包括账号会话、历史数据库和库设置文件；历史 1748 → 1748，收藏 7 → 7。客户端由安装器重新启动。
+
+`node tools/qa-paused-buffer.mjs --installed --rate=3 --duration=51 --label=installed-1.5.13-pause`：8 项通过。安装版使用独立档案和本地 HLS，暂停后缓至 51 秒/100%，保持原集和暂停，恢复后 1.3 秒推进约 3.91 秒并呈现 67 帧。测试没有改写正式账号或播放偏好。
+
+安装记录：`_work/install-upgrade-current/status.json`、`before-data.json`、`after-data.json`；安装版播放记录：`_work/paused-buffer/installed-1.5.13-pause.json`。数据备份仅本机保存，不进入 Git 或 Release。
